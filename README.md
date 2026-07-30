@@ -30,6 +30,8 @@ npm install
 npm run dev        # http://localhost:3000
 npm run build      # production build; typecheck runs as part of it
 npm start          # serve the production build
+npm test           # vitest, run once
+npm run test:watch
 ```
 
 ## Pointing it at an orchestrator
@@ -102,18 +104,56 @@ already assumes a reverse proxy in front of the API; this is that proxy. `Origin
 way up (the API would otherwise 403 it), and the origin check API.md §2 performs is re-performed at
 the proxy against the dashboard's own host, so the control is relocated rather than dropped.
 
-**The event stream is read with `fetch`, not `EventSource`.** API.md §8 suggests `EventSource`, and
-its reasoning is good. The problem is that `EventSource` does not expose comment frames, and the
-API's `: keep-alive` every 15s is the only traffic on an idle fleet until the 30-minute
-`maxLifetimeMillis` cycle. Through `EventSource` a half-open socket — a slept laptop, a NAT timeout,
-a proxy that vanished — would leave the dashboard showing half-hour-old state while claiming to be
-live. Reading the stream directly makes keep-alives visible, so silence beyond two keep-alive
-periods is a reliable signal, and reconnects use `?cursor=`, which §8 says wins over
-`Last-Event-ID`. The cookie still does the authenticating.
+**The event stream is read with `fetch`, not `EventSource` — and the original reason no longer
+applies.** This client was first written over `fetch` because the keep-alive was an SSE *comment*
+and `EventSource` cannot see comment frames, so an idle fleet could leave a dashboard rendering
+half-hour-old state with `readyState === OPEN`. §8 now sends a named `ping` event that both
+transports see, and presents `EventSource` as a legitimate choice again.
+
+`fetch` is kept for a different reason: **`EventSource` cannot see the HTTP status of a failed
+connection.** Its `onerror` is opaque, and this dashboard treats three failures differently — `401`
+(the session is gone: stop retrying and show the sign-in), `503 STREAM_LIMIT` (retryable, honour
+`Retry-After`), and a transport drop (back off and keep trying). Owning the reconnect also buys
+exponential backoff with jitter rather than a fixed `reconnectMillis` with no ceiling, and an
+explicit `?cursor=` resume, which §8 says wins over `Last-Event-ID`. The cookie still does the
+authenticating.
+
+Either transport needs the same watchdog, and §8 says so: `readyState === OPEN` is not evidence of
+liveness, a recent `ping` is. The threshold here is `2.5 × keepAliveMillis`, read from `hello`
+rather than hard-coded — below `2×` you reconnect on ordinary jitter.
+
+**Nothing hard-codes an enumeration.** `GET /meta` serves every closed set the API can return *or
+accept*, so the fleet filters and the create form are built from it (`src/components/meta-provider.tsx`).
+The two spellings there are not interchangeable: observed state carries Kotlin names (`RUNNING`),
+a definition carries YAML wire values (`persistent`), and a form offering `PERSISTENT` would build
+a document the parser rejects.
 
 **Filtering is client-side.** `GET /servers` takes `labelSelector`, `state` and `terminating`, but
 the stream is unfiltered, so filtering the live set keeps a filter live instead of freezing it to
 one list response. There is no pagination to work around — §11 says there is deliberately none.
+
+### What the tests cover
+
+`npm test` (vitest, node environment — the store is deliberately DOM-free) is aimed at the one
+behaviour whose failure is invisible: **stream liveness**. A watchdog that silently stops firing
+looks exactly like a healthy connection until an operator is reading stale numbers during an
+incident.
+
+- `src/lib/stream/store.test.ts` drives the real store through the **real SSE wire format**, so the
+  parser is under test too. It covers: `ping` counting as proof of life across an idle fleet; a
+  half-open socket being given up on and resumed from the last cursor; the threshold coming from
+  the served `keepAliveMillis` rather than a constant; a proxy-injected comment counting as traffic
+  but not as an event; a stream that opens `200` and closes immediately being backed off rather
+  than redialled in a spin; a `bye` after a full lifetime reconnecting at once *without* counting
+  an attempt; a `401` reaching the session-lost listeners; and `Retry-After` being honoured on
+  `503 STREAM_LIMIT`.
+- `src/lib/form/definition-form.test.ts` pins two contract invariants: that a fetched `Definition`
+  is assignable to `DefinitionInput` with no cast (§14's round-trip claim — the assignment *is* the
+  test), and that unset optional fields are omitted rather than sent as `null` (§6 — an explicit
+  `null` is a violation, not "use the default").
+
+These complement rather than replace exercising the app against a live orchestrator, which is what
+found the reconnect-spin bug and the 401-propagation gap in the first place.
 
 ### What this dashboard will not do
 
