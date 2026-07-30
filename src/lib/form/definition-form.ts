@@ -1,45 +1,21 @@
-import type { Definition, Kind, PaperServerSpec, Violation } from '../api/types';
+import type {
+  Definition,
+  DefinitionInput,
+  PaperServerSpec,
+  PaperServerSpecInput,
+  StorageMode,
+  Violation,
+} from '../api/types';
 
-/**
- * The document a form sends.
- *
- * §14 declares `Definition` and says it is "valid input to POST/PUT" — true of
- * a *complete* one, which is what `GET` returns, because `definition.spec` is
- * the effective spec with every default already resolved. It is not the type of
- * a minimal input: `minimal.yaml` omits `maxPlayers`, `network`, `storage`,
- * `lifecycle` and `resources.heap` entirely and validates fine, but that
- * document does not satisfy `PaperServerSpec`. So the outgoing shape gets its
- * own type rather than being forced through the returned one.
- *
- * Optional fields are OMITTED, never sent as `null` — §6 is explicit that the
- * schema treats an explicit `null` as a violation rather than as "unset".
+/*
+ * The outgoing document type is `DefinitionInput`, declared in API.md §14 and
+ * transcribed in `../api/types`. This module used to declare its own because
+ * the contract had no input type — §14's `Definition` describes the *effective*
+ * definition `GET` returns, which a minimal document does not satisfy. The
+ * contract now declares both, and a test on the API side pins the required set
+ * against the parser, so the local copy is gone: a shape that can drift from
+ * the parser is worse than no shape at all.
  */
-export interface DefinitionInput {
-  apiVersion: Definition['apiVersion'];
-  kind: Kind;
-  metadata: { name: string; labels?: Record<string, string> };
-  spec: {
-    image: string;
-    paper: { minecraftVersion: string; build?: number };
-    eulaAccepted: true;
-    maxPlayers?: number;
-    network?: {
-      port?: number;
-      hostPort?: number;
-      rcon?: { enabled: true; port?: number; passwordSecret: { name: string; key: string } };
-    };
-    resources: { memory: string; cpu?: string; heap?: { max?: string; min?: string } };
-    storage?:
-      | { mode: 'persistent'; mountPath?: string; volume?: { name?: string; size?: string } }
-      | { mode: 'ephemeral'; mountPath?: string };
-    lifecycle?: {
-      drain?: { policy?: 'waitForZeroPlayers'; playerTransferTimeout?: string; saveTimeout?: string };
-      stopGracePeriod?: string;
-      startupTimeout?: string;
-    };
-    placement?: { node: string };
-  };
-}
 
 /**
  * Every editable field, keyed by the dotted path the API uses in
@@ -94,7 +70,7 @@ export interface FormState {
   values: Record<FieldPath, string>;
   eulaAccepted: boolean;
   rconEnabled: boolean;
-  storageMode: 'persistent' | 'ephemeral';
+  storageMode: StorageMode;
   /** One `key=value` per line — the same shape as a label selector, unrolled. */
   labels: string;
 }
@@ -162,7 +138,22 @@ export function parseLabels(text: string): Record<string, string> | undefined {
   return Object.keys(labels).length > 0 ? labels : undefined;
 }
 
-export function toDefinitionInput(state: FormState): DefinitionInput {
+/**
+ * What a half-filled form holds: a `DefinitionInput` except that
+ * `eulaAccepted` may still be `false`.
+ *
+ * A draft is not necessarily valid input — that is the entire point of a form —
+ * and `DefinitionInput` mandates `eulaAccepted: true`. Sending the `false` the
+ * operator actually left there is more honest than casting it away, and it
+ * produces exactly the 422 the checkbox needs (`must be true: a Paper server
+ * refuses to start until the Minecraft EULA is accepted`), attached to
+ * `spec.eulaAccepted`.
+ */
+export type DefinitionDraft = Omit<DefinitionInput, 'spec'> & {
+  spec: Omit<PaperServerSpecInput, 'eulaAccepted'> & { eulaAccepted: boolean };
+};
+
+export function toDefinitionInput(state: FormState): DefinitionDraft {
   const heap = compact({
     max: trimmed(state, 'spec.resources.heap.max'),
     min: trimmed(state, 'spec.resources.heap.min'),
@@ -185,7 +176,7 @@ export function toDefinitionInput(state: FormState): DefinitionInput {
     rcon,
   });
 
-  const storage: DefinitionInput['spec']['storage'] =
+  const storage: PaperServerSpecInput['storage'] =
     state.storageMode === 'ephemeral'
       ? // Ephemeral has to be asked for by name. Omitting `storage` entirely
         // gives a persistent volume, which is the safe side, so the form never
@@ -213,31 +204,36 @@ export function toDefinitionInput(state: FormState): DefinitionInput {
 
   const node = trimmed(state, 'spec.placement.node');
 
+  // Required objects are built directly; only genuinely optional *groups* go
+  // through `compact`, which collapses to `undefined` when every child is
+  // unset. `JSON.stringify` then drops those properties, which §14 states is
+  // the correct way to leave an optional field unset — an explicit `null`
+  // would be a violation, not "use the default".
   return {
     apiVersion: 'mcorch.dev/v1alpha1',
     kind: 'PaperServer',
-    metadata: compact({
+    metadata: {
       name: state.values['metadata.name'].trim(),
       labels: parseLabels(state.labels),
-    }) as DefinitionInput['metadata'],
-    spec: compact({
+    },
+    spec: {
       image: state.values['spec.image'].trim(),
-      paper: compact({
+      paper: {
         minecraftVersion: state.values['spec.paper.minecraftVersion'].trim(),
         build: asNumber(trimmed(state, 'spec.paper.build')),
-      }) as DefinitionInput['spec']['paper'],
-      eulaAccepted: state.eulaAccepted ? (true as const) : (undefined as never),
+      },
+      eulaAccepted: state.eulaAccepted,
       maxPlayers: asNumber(trimmed(state, 'spec.maxPlayers')),
       network,
-      resources: compact({
+      resources: {
         memory: state.values['spec.resources.memory'].trim(),
         cpu: trimmed(state, 'spec.resources.cpu'),
         heap,
-      }) as DefinitionInput['spec']['resources'],
+      },
       storage,
       lifecycle,
       placement: node !== undefined ? { node } : undefined,
-    }) as DefinitionInput['spec'],
+    },
   };
 }
 

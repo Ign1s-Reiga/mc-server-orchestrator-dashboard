@@ -15,6 +15,25 @@ import {
   type ViolationIndex,
 } from '@/lib/form/definition-form';
 import { Button, Note, Panel, cx } from './ui';
+import {
+  FALLBACK_DRAIN_POLICIES,
+  FALLBACK_STORAGE_MODES,
+  useMeta,
+} from './meta-provider';
+
+/**
+ * What each storage mode means, keyed by wire value.
+ *
+ * The *list* comes from `/meta`; only the prose lives here, so a mode added to
+ * `:schema` still appears in the form — it just arrives without a description
+ * until this table catches up, which is the right way round.
+ */
+const STORAGE_MODE_MEANING: Record<string, string> = {
+  persistent:
+    'A volume that outlives the container. The default, and the right answer for anything with a world.',
+  ephemeral:
+    'World data does not survive the container. Only for disposable lobbies and minigame instances.',
+};
 
 /* ------------------------------------------------------------------ inputs */
 
@@ -181,6 +200,10 @@ export function DefinitionForm({
   header?: React.ReactNode;
   footer?: React.ReactNode;
 }) {
+  const meta = useMeta();
+  const storageModes = meta?.enums.storageMode ?? FALLBACK_STORAGE_MODES;
+  const drainPolicies = meta?.enums.drainPolicy ?? FALLBACK_DRAIN_POLICIES;
+
   const [liveViolations, setLiveViolations] = useState<readonly Violation[] | null>(null);
   const [effective, setEffective] = useState<Definition | null>(null);
   const [validateError, setValidateError] = useState<string | null>(null);
@@ -414,7 +437,13 @@ export function DefinitionForm({
       <Section title="storage" columns={1}>
         <fieldset className="flex flex-col gap-2">
           <legend className="label mb-1">mode</legend>
-          {(['persistent', 'ephemeral'] as const).map((mode) => (
+          {/*
+            §10 serves these as YAML *wire* values, which is why they render
+            verbatim rather than title-cased: `persistent` is what goes into the
+            document, and a form offering `PERSISTENT` would build one the
+            parser rejects.
+          */}
+          {storageModes.map((mode) => (
             <label key={mode} className="flex items-start gap-2.5 text-[13px]">
               <input
                 type="radio"
@@ -426,9 +455,7 @@ export function DefinitionForm({
               <span>
                 <span className="mono">{mode}</span>
                 <span className="block text-[11px]" style={{ color: 'var(--text-faint)' }}>
-                  {mode === 'persistent'
-                    ? 'A volume that outlives the container. The default, and the right answer for anything with a world.'
-                    : 'World data does not survive the container. Only for disposable lobbies and minigame instances.'}
+                  {STORAGE_MODE_MEANING[mode] ?? 'a storage mode this build has no description for'}
                 </span>
               </span>
             </label>
@@ -454,6 +481,15 @@ export function DefinitionForm({
       </Section>
 
       <Section title="lifecycle" hint="how this server is allowed to stop">
+        <div className="flex flex-col gap-1 sm:col-span-2">
+          <span className="label">drain policy</span>
+          <p className="mono text-[13px]">{drainPolicies.join(', ')}</p>
+          <p className="text-[11px]" style={{ color: 'var(--text-faint)' }}>
+            {drainPolicies.length === 1
+              ? 'The only policy the schema defines, so it is applied and not asked about. A second one would appear here from /meta with no frontend release.'
+              : 'Served by the API — this build renders whatever the schema defines.'}
+          </p>
+        </div>
         <Input
           ctx={ctx}
           path="spec.lifecycle.drain.playerTransferTimeout"

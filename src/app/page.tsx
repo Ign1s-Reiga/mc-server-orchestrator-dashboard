@@ -7,21 +7,8 @@ import { AttentionFlag, GenerationGauge, StateBadge } from '@/components/state-b
 import { DrainInline } from '@/components/drain-ribbon';
 import { Button, Empty, LinkButton, Panel, Spinner, cx } from '@/components/ui';
 import { age } from '@/lib/display';
+import { FALLBACK_DISPLAY_STATES, useMeta } from '@/components/meta-provider';
 import type { DisplayState, ServerResource } from '@/lib/api/types';
-
-/** §10 ships this list; it is repeated here only as the filter bar's order. */
-const FILTERABLE_STATES: readonly DisplayState[] = [
-  'READY',
-  'RUNNING',
-  'STARTING',
-  'PENDING',
-  'DRAINING',
-  'TERMINATING',
-  'STOPPING',
-  'STOPPED',
-  'FAILED',
-  'UNKNOWN',
-];
 
 interface Filters {
   states: Set<DisplayState>;
@@ -113,6 +100,11 @@ function FilterBar({
   onChange: (next: Filters) => void;
   servers: readonly ServerResource[];
 }) {
+  const meta = useMeta();
+  // §10 serves the badge vocabulary so a new one reaches these filters with no
+  // frontend release. The fallback only covers the moment before /meta lands.
+  const known: readonly DisplayState[] = meta?.enums.displayState ?? FALLBACK_DISPLAY_STATES;
+
   const present = useMemo(() => {
     const counts = new Map<DisplayState, number>();
     for (const server of servers) {
@@ -121,11 +113,15 @@ function FilterBar({
     return counts;
   }, [servers]);
 
+  // Anything observed but not in the served list still gets a chip, so a badge
+  // this build has never heard of is filterable rather than invisible.
+  const states = [...known, ...[...present.keys()].filter((state) => !known.includes(state))];
+
   const attention = servers.filter((server) => server.display.needsAttention).length;
 
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-2">
-      {FILTERABLE_STATES.filter((state) => present.has(state)).map((state) => {
+      {states.filter((state) => present.has(state)).map((state) => {
         const on = filters.states.has(state);
         return (
           <button

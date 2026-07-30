@@ -3,6 +3,7 @@ import { IBM_Plex_Mono, IBM_Plex_Sans } from 'next/font/google';
 import './globals.css';
 import { SessionProvider } from '@/components/session-provider';
 import { FleetProvider } from '@/components/fleet-provider';
+import { MetaProvider } from '@/components/meta-provider';
 import { Shell } from '@/components/shell';
 
 /*
@@ -38,9 +39,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="en" className={`${plexSans.variable} ${plexMono.variable} h-full`}>
       <body className="min-h-full">
         <SessionProvider>
-          <FleetProvider>
-            <Shell>{children}</Shell>
-          </FleetProvider>
+          <MetaProvider>
+            <FleetProvider>
+              <Shell>{children}</Shell>
+            </FleetProvider>
+          </MetaProvider>
         </SessionProvider>
       </body>
     </html>
