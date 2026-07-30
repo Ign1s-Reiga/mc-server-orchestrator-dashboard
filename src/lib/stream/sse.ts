@@ -1,28 +1,37 @@
 /**
  * A minimal server-sent-events reader over `fetch` + `ReadableStream`.
  *
- * ## Why not `EventSource`
+ * ## Why `fetch` and not `EventSource`
  *
- * API.md §8 suggests `EventSource`, and its reasoning is sound: it reconnects
- * and replays `Last-Event-ID` with no client code. This app uses `fetch`
- * instead, for one reason that matters to an operator:
+ * **The original reason is gone; this is the current one.** This client was
+ * first written over `fetch` because the API's keep-alive was an SSE *comment*
+ * (`: keep-alive`) and `EventSource` does not expose comment frames to script —
+ * so on an idle fleet an `EventSource` client could render half-hour-old state
+ * with `readyState === OPEN` and no way to notice. §8 now sends a named `ping`
+ * event instead, visible to both transports, and presents `EventSource` as a
+ * legitimate choice again. That argument no longer applies.
  *
- * **`EventSource` does not expose comment frames.** The API writes
- * `: keep-alive` every `keepAliveMillis` (15s by default) precisely so a client
- * can tell a healthy-but-idle stream from a dead socket. Through `EventSource`
- * those frames are invisible, so on a fleet where nothing is changing the only
- * guaranteed traffic is the `bye` at `maxLifetimeMillis` — 30 minutes. A
- * half-open connection (a slept laptop, a NAT timeout, a proxy that vanished)
- * would leave the dashboard showing half-hour-old state while claiming to be
- * live. That is the exact failure the dashboard must not have.
+ * `fetch` is kept for a different reason that does still apply: **`EventSource`
+ * cannot see the HTTP status of a failed connection.** Its `onerror` is opaque.
+ * This dashboard has to tell three failures apart and treats each differently:
  *
- * Reading the stream directly makes every keep-alive visible, so silence longer
- * than a couple of keep-alive periods is a reliable signal, and the reconnect
- * uses `?cursor=` — which §8 says wins over `Last-Event-ID` — so the resume is
- * explicit rather than delegated.
+ * - `401 UNAUTHENTICATED` — the session went away (an API restart drops its
+ *   in-memory sessions). Stop retrying and show the sign-in.
+ * - `503 STREAM_LIMIT` — every stream slot upstream is taken. Retryable, and
+ *   `Retry-After` says when; hammering makes it worse.
+ * - a transport failure — back off and keep trying.
  *
- * The cookie still does the authenticating. Nothing here sets an `Authorization`
- * header; the point of the session cookie is unchanged.
+ * Through `EventSource` all three are one indistinguishable `error` event
+ * followed by an automatic reconnect at a fixed `reconnectMillis`, with no
+ * jitter and no ceiling. Owning the reconnect also buys exponential backoff
+ * with jitter, which is what stops every open tab retrying a restarting
+ * orchestrator on the same tick.
+ *
+ * The cookie still does the authenticating. Nothing here sets an
+ * `Authorization` header; the point of the session cookie is unchanged.
+ *
+ * Comment frames are still parsed. §8 says the stream sends none, but a proxy
+ * may inject one, and treating it as liveness rather than choking on it is free.
  */
 
 export interface SseFrame {
@@ -66,7 +75,8 @@ export class SseParser {
       }
 
       if (line.startsWith(':')) {
-        // A comment. The API's keep-alive arrives here and nowhere else.
+        // The API sends none of these — liveness is the named `ping` event —
+        // but a proxy may inject one, so it counts as traffic and nothing more.
         frames.push({ event: '', data: line.slice(1).trim(), id: null, comment: true });
         continue;
       }

@@ -30,8 +30,10 @@ export interface FleetSnapshot {
   readonly connection: ConnectionState;
   /** Whether a snapshot has ever arrived. Distinguishes "empty fleet" from "no data yet". */
   readonly primed: boolean;
-  /** `Date.now()` of the last frame of any kind, keep-alive comments included. */
+  /** `Date.now()` of the last frame of any kind. What the watchdog measures. */
   readonly lastFrameAt: number | null;
+  /** `Date.now()` of the last `ping` — the API's explicit liveness beat. */
+  readonly lastPingAt: number | null;
   /** `Date.now()` of the last event that carried fleet data. */
   readonly lastDataAt: number | null;
   readonly cursor: string | null;
@@ -40,6 +42,8 @@ export interface FleetSnapshot {
     statusPollMillis: number;
     keepAliveMillis: number;
     maxLifetimeMillis: number;
+    /** The SSE `retry:` value this client deliberately overrides. */
+    reconnectMillis: number;
     resumed: boolean;
   } | null;
   /**
@@ -60,6 +64,7 @@ const EMPTY: FleetSnapshot = {
   connection: 'idle',
   primed: false,
   lastFrameAt: null,
+  lastPingAt: null,
   lastDataAt: null,
   cursor: null,
   hello: null,
@@ -69,18 +74,24 @@ const EMPTY: FleetSnapshot = {
   lastError: null,
 };
 
-/** Defaults from API.md §10, used until `hello` supplies the real numbers. */
+/**
+ * Fallback for `keepAliveMillis` until `hello` supplies the real number.
+ *
+ * The server is the authority — it is in `hello` and in `meta.stream` — so this
+ * only covers the sub-second window before `hello` lands.
+ */
 const DEFAULT_KEEP_ALIVE_MILLIS = 15_000;
-const DEFAULT_MAX_LIFETIME_MILLIS = 1_800_000;
 
 /**
  * Silence tolerated before the stream is treated as dead.
  *
- * Two keep-alive periods plus a second of slack: one missed frame is a hiccup,
- * two in a row is a socket nothing is coming out of.
+ * §8: "~2.5 keep-alive intervals. Below 2 you will reconnect on ordinary
+ * jitter." A `ping` is due every `keepAliveMillis` whether or not anything
+ * changed, so missing two in a row is a socket nothing is coming out of — but
+ * one late one is a scheduler hiccup, not an outage.
  */
-function silenceBudget(keepAliveMillis: number): number {
-  return keepAliveMillis * 2 + 1_000;
+export function silenceBudget(keepAliveMillis: number): number {
+  return Math.round(keepAliveMillis * 2.5);
 }
 
 const BACKOFF_MIN_MILLIS = 500;
@@ -205,10 +216,11 @@ export class FleetStore {
       const budget = silenceBudget(hello?.keepAliveMillis ?? DEFAULT_KEEP_ALIVE_MILLIS);
       if (Date.now() - lastFrameAt > budget) {
         // The socket is open as far as the runtime is concerned but nothing is
-        // coming out of it. Do not keep claiming this data is live.
+        // coming out of it. §8: an open readyState is not evidence of liveness,
+        // a recent `ping` is. Do not keep claiming this data is live.
         this.set({
           connection: 'silent',
-          lastError: 'the stream went quiet — no keep-alive within the promised window',
+          lastError: 'the stream went quiet — no ping within the promised window',
         });
         this.reconnectNow();
       }
@@ -318,8 +330,10 @@ export class FleetStore {
         if (done) break;
         if (generation !== this.generation) return;
         for (const frame of parser.push(value)) {
+          // Any frame is evidence the socket is alive; `ping` is the one the
+          // API guarantees on an idle fleet, and is what the watchdog relies on.
           this.set({ lastFrameAt: Date.now() });
-          if (frame.comment) continue; // keep-alive: liveness only, no payload
+          if (frame.comment) continue; // not sent by this API; liveness only
           if (frame.id !== null) this.set({ cursor: frame.id });
           this.apply(frame.event, frame.data);
         }
@@ -370,17 +384,27 @@ export class FleetStore {
 
     switch (event.type) {
       case 'hello': {
+        // The cadences are the server's to decide, so the watchdog threshold is
+        // derived from `keepAliveMillis` rather than hard-coded here.
         this.set({
           hello: {
             changePollMillis: event.data.changePollMillis,
             statusPollMillis: event.data.statusPollMillis,
             keepAliveMillis: event.data.keepAliveMillis,
             maxLifetimeMillis: event.data.maxLifetimeMillis,
+            reconnectMillis: event.data.reconnectMillis,
             resumed: event.data.resumed,
           },
           cursor: event.data.cursor,
           connection: 'live',
         });
+        return;
+      }
+      case 'ping': {
+        // The liveness beat. It carries the cursor, so if the watchdog does
+        // fire, the reconnect resumes from here rather than re-listing an idle
+        // fleet — which §8 notes is the expensive path.
+        this.set({ lastPingAt: Date.now(), cursor: event.data.cursor });
         return;
       }
       case 'snapshot': {
