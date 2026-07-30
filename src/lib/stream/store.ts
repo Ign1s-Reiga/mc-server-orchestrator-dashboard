@@ -306,7 +306,8 @@ export class FleetStore {
       return;
     }
 
-    this.set({ connection: 'live', attempt: 0, retryAt: null, lastError: null, lastFrameAt: Date.now() });
+    const openedAt = Date.now();
+    this.set({ connection: 'live', attempt: 0, retryAt: null, lastError: null, lastFrameAt: openedAt });
 
     const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
     const parser = new SseParser();
@@ -333,10 +334,24 @@ export class FleetStore {
     // an error — §8 notes the resume path is exercised in normal operation
     // rather than only after a failure — so reconnect immediately and without
     // counting it as a failed attempt.
-    if (this.snapshot.connection === 'live' && this.snapshot.lastError === null) {
+    //
+    // "Lasted a while" is part of the test on purpose. A connection that opens
+    // 200 OK and closes straight away is not a clean lifetime rollover, it is a
+    // sick server, and treating it as clean would spin this loop as fast as the
+    // network allows. Anything shorter than the grace window backs off instead.
+    const CLEAN_CLOSE_GRACE_MILLIS = 5_000;
+    const lasted = Date.now() - openedAt;
+    if (
+      this.snapshot.connection === 'live' &&
+      this.snapshot.lastError === null &&
+      lasted >= CLEAN_CLOSE_GRACE_MILLIS
+    ) {
       this.set({ connection: 'connecting' });
       void this.connect(generation);
       return;
+    }
+    if (lasted < CLEAN_CLOSE_GRACE_MILLIS && this.snapshot.lastError === null) {
+      this.set({ lastError: 'the API accepted the stream and then closed it immediately' });
     }
     this.scheduleRetry(generation);
   }

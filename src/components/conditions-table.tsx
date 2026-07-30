@@ -51,7 +51,8 @@ export function ConditionsTable({ status }: { status: ServerStatus }) {
                   <span className="mono text-[12px]" style={{ color }}>
                     {condition.type}
                   </span>
-                  <span className="sr-only"> is {condition.status}</span>
+                  {/* The status is the row's other visible column; the glyph in
+                      the first cell is aria-hidden so it is announced once. */}
                   <div className="mono text-[10px]" style={{ color: 'var(--text-faint)' }}>
                     {condition.status}
                   </div>
