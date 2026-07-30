@@ -58,7 +58,96 @@ export type ConditionType =
 export type ConditionStatus = 'TRUE' | 'FALSE' | 'UNKNOWN';
 export type FailureClass = 'RETRYABLE' | 'PERMANENT';
 
-/** Absent optional fields are OMITTED here — see §6. Valid input to POST/PUT. */
+export type FailureReason =
+  | 'IMAGE_PULL_FAILED'
+  | 'IMAGE_REFERENCE_REJECTED'
+  | 'SANDBOX_CREATE_FAILED'
+  | 'CONTAINER_CREATE_FAILED'
+  | 'CONTAINER_START_FAILED'
+  | 'CONTAINER_EXITED'
+  | 'READINESS_TIMEOUT'
+  | 'VOLUME_UNAVAILABLE'
+  | 'NODE_UNAVAILABLE'
+  | 'RUNTIME_UNREACHABLE'
+  | 'DRAIN_NO_DESTINATION'
+  | 'DRAIN_TRANSFER_FAILED'
+  | 'DRAIN_SAVE_TIMEOUT'
+  | 'DRAIN_STALLED'
+  | 'UNKNOWN';
+
+/** Wire values, because these are written back into a definition. */
+export type StorageMode = 'persistent' | 'ephemeral';
+export type DrainPolicy = 'waitForZeroPlayers';
+
+/* ── what you SEND ─────────────────────────────────────────────────────────── */
+
+/**
+ * The body of `POST /servers`, `PUT /servers/{name}` and `POST /validate`.
+ *
+ * Everything the parser defaults is optional, which is most of the spec: a
+ * four-field document validates. Note `?:` and NOT `| null` throughout — an
+ * explicit `null` is a violation, not "use the default" (§6). `JSON.stringify`
+ * drops `undefined` properties, so an optional property left unset is correct;
+ * one set to `null` is a 422.
+ *
+ * Unknown fields are rejected with a violation naming the field, so this is not
+ * merely advisory — a typo is a 422 with `did you mean …?` attached.
+ */
+export interface DefinitionInput {
+  apiVersion: ApiVersion;
+  kind: Kind;
+  metadata: { name: string; labels?: Record<string, string> };
+  spec: PaperServerSpecInput;
+}
+
+export interface PaperServerSpecInput {
+  /** Required. Pinned to a tag or a digest; `latest` is rejected. */
+  image: string;
+  /** Required. `build` is optional. */
+  paper: { minecraftVersion: string; build?: number };
+  /** Required, and must be `true`. A Paper server never starts without it. */
+  eulaAccepted: true;
+  /** Required — but only `memory` inside it is. */
+  resources: {
+    memory: string;
+    cpu?: string;
+    /** Defaults to the largest heap that leaves the container headroom. */
+    heap?: { max?: string; min?: string };
+  };
+  maxPlayers?: number;
+  network?: {
+    port?: number;
+    hostPort?: number;
+    /** Omit for no RCON. `passwordSecret` is required once `enabled` is true. */
+    rcon?: { enabled?: boolean; port?: number; passwordSecret?: SecretRef };
+  };
+  /** Defaults to persistent, on a volume named after the server. */
+  storage?:
+    | { mode?: 'persistent'; mountPath?: string; volume?: { name?: string; size?: string } }
+    /** `volume` must NOT be set here — a 422 if it is. */
+    | { mode: 'ephemeral'; mountPath?: string };
+  lifecycle?: {
+    drain?: { policy?: DrainPolicy; playerTransferTimeout?: string; saveTimeout?: string };
+    /** Must exceed `drain.saveTimeout` by at least 30s. Default: saveTimeout + 60s. */
+    stopGracePeriod?: string;
+    startupTimeout?: string;
+  };
+  placement?: { node?: string };
+}
+
+/* ── what you RECEIVE ──────────────────────────────────────────────────────── */
+
+/**
+ * The `definition` field of a server resource. Absent optional fields are
+ * OMITTED, not null (§6) — which is what makes it assignable to
+ * `DefinitionInput`, so a fetched definition can be edited and PUT back with no
+ * cast:
+ *
+ *     const draft: DefinitionInput = server.definition;   // compiles
+ *
+ * Unlike `DefinitionInput`, every defaulted field is present: this is the
+ * *effective* definition the reconciler acts on, not what the operator typed.
+ */
 export interface Definition {
   apiVersion: ApiVersion;
   kind: Kind;
@@ -162,7 +251,7 @@ export interface DrainStatus {
 }
 
 export interface FailureStatus {
-  reason: string;
+  reason: FailureReason;
   failureClass: FailureClass;
   /** redacted upstream; no unredacted view exists */
   message: string;
@@ -263,14 +352,22 @@ export type StreamEvent =
         statusPollMillis: number;
         keepAliveMillis: number;
         maxLifetimeMillis: number;
+        reconnectMillis: number;
       };
     }
   | { type: 'snapshot'; data: { cursor: string; count: number; items: ServerResource[] } }
   | {
       type: 'updated';
-      data: { name: string; reason: 'definition' | 'status' | 'resync'; server: ServerResource };
+      data: { name: string; reason: 'definition' | 'status'; server: ServerResource };
     }
   | { type: 'removed'; data: { name: string; reason: 'PURGED' } }
+  /**
+   * The liveness beat, every `keepAliveMillis` whether or not anything changed.
+   * A named event rather than an SSE comment, so `EventSource` and `fetch` see
+   * the same protocol. It carries the cursor, so a watchdog that gives up can
+   * resume from here instead of re-listing an idle fleet.
+   */
+  | { type: 'ping'; data: { at: string; cursor: string } }
   | { type: 'expired'; data: { cursor: string; message: string } }
   | { type: 'bye'; data: { reason: 'MAX_LIFETIME'; cursor: string } };
 
@@ -341,12 +438,26 @@ export interface ApiMeta {
   apiVersions: string[];
   currentApiVersion: string;
   kinds: string[];
+  /**
+   * Every closed set the API can return **or accept**, so the dashboard
+   * hard-codes none — not in a filter and not in a create form.
+   *
+   * The two spellings are not cosmetic (§10). `…State`/`…Type`/`…Reason`/
+   * `…Class` are read back and carry Kotlin names (`RUNNING`, `DRAIN_STALLED`);
+   * `storageMode` and `drainPolicy` are *sent* in a definition and carry YAML
+   * wire values (`persistent`, `waitForZeroPlayers`). A form offering
+   * `PERSISTENT` would build a document the parser rejects.
+   */
   enums: {
-    phase: string[];
-    drainState: string[];
-    conditionType: string[];
-    failureReason: string[];
-    displayState: string[];
+    phase: ServerPhase[];
+    drainState: DrainState[];
+    conditionType: ConditionType[];
+    conditionStatus: ConditionStatus[];
+    failureReason: FailureReason[];
+    failureClass: FailureClass[];
+    displayState: DisplayState[];
+    storageMode: StorageMode[];
+    drainPolicy: DrainPolicy[];
   };
   limits: { maxBodyBytes: number; maxStreams: number };
   stream: {
@@ -355,5 +466,8 @@ export interface ApiMeta {
     statusPollMillis: number;
     keepAliveMillis: number;
     maxLifetimeMillis: number;
+    /** The SSE `retry:` value the API sends. A client with its own backoff
+     *  ignores it; this is here so it can see what it is overriding. */
+    reconnectMillis: number;
   };
 }
