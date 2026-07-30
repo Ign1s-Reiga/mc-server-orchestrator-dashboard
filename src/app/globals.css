@@ -1,26 +1,193 @@
-@import "tailwindcss";
+@import 'tailwindcss';
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/*
+ * mcorch dashboard — design tokens
+ *
+ * Two rules carry the identity, and everything else is quiet:
+ *
+ * 1. TYPE IS SEMANTIC. Mono is the system's own vocabulary — names, states,
+ *    phases, resource versions, container ids, durations, field paths, counts.
+ *    Sans is language written for a person — the API's `message` and
+ *    `explanation` strings, help text, buttons. If a string came out of the
+ *    data model it is set in mono; if it was written to be read, it is sans.
+ *
+ * 2. COLOUR IS SPENT, NOT SPREAD. Most states are monochrome. Saturation is
+ *    reserved for exactly three things: READY (joinable — the state you want),
+ *    a drain in flight (irreversible, and correct behaviour, so gold rather
+ *    than red), and failure or NEEDS_ATTENTION (the thing that wants you).
+ *
+ * The palette is drawn from the ores of the subject's own world — lapis for
+ * structure, emerald for the live signal, gold for work in progress, redstone
+ * for a fault — used as an instrument panel, not as a game skin.
+ */
+
+@theme {
+  --color-ink-900: #070b11;
+  --color-ink-800: #0b1017;
+  --color-ink-700: #121924;
+  --color-ink-600: #1a2432;
+  --color-ink-500: #263346;
+
+  --color-slate-400: #59657a;
+  --color-slate-300: #8593a8;
+  --color-slate-200: #b6c1d1;
+
+  --color-paper-100: #eef0f3;
+  --color-paper-200: #dfe3e9;
+  --color-paper-300: #c9d0d9;
+
+  --color-lapis: #2e5c9a;
+  --color-lapis-bright: #4d84cc;
+  --color-emerald: #3fbf87;
+  --color-emerald-dim: #1f7a55;
+  --color-gold: #d9a441;
+  --color-gold-dim: #8a6620;
+  --color-redstone: #cf3a2e;
+  --color-redstone-dim: #8f2119;
+
+  --font-sans: var(--font-plex-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, 'SFMono-Regular', monospace;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+/*
+ * Semantic surface tokens. Both schemes are first-class: this is a tool that
+ * sits open on a second monitor all day, and which scheme that monitor wants
+ * is not the dashboard's decision to make.
+ */
+:root {
+  --bg: var(--color-paper-100);
+  --bg-raised: #ffffff;
+  --bg-sunken: var(--color-paper-200);
+  --line: var(--color-paper-300);
+  --line-strong: #a9b4c2;
+  --text: var(--color-ink-800);
+  --text-dim: #55627a;
+  --text-faint: #7a8699;
+  --accent: var(--color-lapis);
+  --ok: var(--color-emerald-dim);
+  --work: #9a7420;
+  --fault: var(--color-redstone-dim);
+  --shadow: 0 1px 2px rgb(11 16 23 / 0.06), 0 4px 16px -8px rgb(11 16 23 / 0.14);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --bg: var(--color-ink-800);
+    --bg-raised: var(--color-ink-700);
+    --bg-sunken: var(--color-ink-900);
+    --line: var(--color-ink-600);
+    --line-strong: var(--color-ink-500);
+    --text: #e6ebf2;
+    --text-dim: #94a2b8;
+    --text-faint: var(--color-slate-400);
+    --accent: var(--color-lapis-bright);
+    --ok: var(--color-emerald);
+    --work: var(--color-gold);
+    --fault: #e2564a;
+    --shadow: 0 1px 2px rgb(0 0 0 / 0.4), 0 8px 24px -12px rgb(0 0 0 / 0.6);
   }
 }
 
+* {
+  border-color: var(--line);
+  min-width: 0;
+}
+
+html {
+  color-scheme: light dark;
+}
+
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* The system's own words. Tight, tabular, unambiguous. */
+.mono {
+  font-family: var(--font-mono);
+  font-variant-ligatures: none;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+/*
+ * The utility label. Mono, uppercase, wide — the instrument-panel voice used
+ * for every field name and column head, so a label is never mistaken for a
+ * value.
+ */
+.label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* Scrollbars, so a dense table does not get a chrome-coloured gutter. */
+* {
+  scrollbar-color: var(--line-strong) transparent;
+  scrollbar-width: thin;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/*
+ * The live pulse. The only ambient motion in the app, and it means one
+ * specific thing: frames are arriving right now.
+ */
+@keyframes pulse-live {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.pulse-live {
+  animation: pulse-live 2.4s ease-in-out infinite;
+}
+
+/*
+ * The drain ribbon's active segment. A drain is the one thing in this product
+ * where "still working" and "stalled" are different enough to be worth
+ * animating apart.
+ */
+@keyframes ribbon-work {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 24px 0;
+  }
+}
+
+.ribbon-active {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    var(--work) 0 6px,
+    color-mix(in srgb, var(--work) 55%, transparent) 6px 12px
+  );
+  background-size: 24px 100%;
+  animation: ribbon-work 1.1s linear infinite;
 }
