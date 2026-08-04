@@ -3,9 +3,9 @@
 import Link from 'next/link';
 import { useParams, useRouter } from 'next/navigation';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { getServer, jsonBody, replaceServer } from '@/lib/api/client';
+import { getServer, jsonBody, replaceServer, yamlBody } from '@/lib/api/client';
 import { describeError, isConflict, isNotFound, isValidationFailure } from '@/lib/api/errors';
-import type { ConflictDetail, ServerResource, Violation } from '@/lib/api/types';
+import type { ConflictDetail, Definition, ServerResource, Violation } from '@/lib/api/types';
 import {
   FIELD_PATHS,
   fromDefinition,
@@ -13,9 +13,30 @@ import {
   type FormState,
 } from '@/lib/form/definition-form';
 import { DefinitionForm } from '@/components/definition-form';
+import { DocumentEditor } from '@/components/document-editor';
 import { useFleetActions, useServer } from '@/components/fleet-provider';
 import { Button, LinkButton, Note, Panel, Spinner } from '@/components/ui';
 import { relative } from '@/lib/display';
+
+/**
+ * Which editor a definition gets.
+ *
+ * The structured form is built field by field against the Paper spec. A
+ * `VelocityProxy` has a different shape — a label selector, two secret
+ * references, a control endpoint — and rather than grow a second field set that
+ * would be half-checked, it is edited as a document. Both paths go through the
+ * same `POST /validate`, the same complete violation list and the same
+ * `If-Match`; only the input widget differs.
+ */
+type Editor =
+  | { kind: 'PaperServer'; form: FormState }
+  | { kind: 'VelocityProxy'; text: string };
+
+function editorFor(definition: Definition): Editor {
+  return definition.kind === 'VelocityProxy'
+    ? { kind: 'VelocityProxy', text: JSON.stringify(definition, null, 2) }
+    : { kind: 'PaperServer', form: fromDefinition(definition) };
+}
 
 export default function EditServerPage() {
   const params = useParams<{ name: string }>();
@@ -24,14 +45,15 @@ export default function EditServerPage() {
   const { merge } = useFleetActions();
   const live = useServer(name);
 
-  const [loaded, setLoaded] = useState<{ form: FormState; etag: string } | null>(null);
-  const [state, setState] = useState<FormState | null>(null);
+  const [loaded, setLoaded] = useState<{ editor: Editor; etag: string } | null>(null);
+  const [editor, setEditor] = useState<Editor | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [violations, setViolations] = useState<readonly Violation[] | null>(null);
-  const [conflict, setConflict] = useState<{ detail: ConflictDetail; stored: ServerResource | null } | null>(
-    null,
-  );
+  const [conflict, setConflict] = useState<{
+    detail: ConflictDetail;
+    stored: ServerResource | null;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   /*
@@ -44,13 +66,15 @@ export default function EditServerPage() {
       try {
         const { server, etag } = await getServer(name, signal);
         if (signal?.aborted === true) return;
-        const form = fromDefinition(server.definition);
-        setLoaded({ form, etag });
-        setState(form);
+        const next = editorFor(server.definition);
+        setLoaded({ editor: next, etag });
+        setEditor(next);
         setLoadError(null);
       } catch (cause) {
         if (signal?.aborted === true) return;
-        setLoadError(isNotFound(cause) ? 'No server by this name is declared.' : describeError(cause));
+        setLoadError(
+          isNotFound(cause) ? 'No server by this name is declared.' : describeError(cause),
+        );
       }
     },
     [name],
@@ -63,22 +87,31 @@ export default function EditServerPage() {
   }, [load]);
 
   const dirty = useMemo(() => {
-    if (loaded === null || state === null) return [];
-    return changedPaths(loaded.form, state);
-  }, [loaded, state]);
+    if (loaded === null || editor === null) return [];
+    if (loaded.editor.kind === 'PaperServer' && editor.kind === 'PaperServer') {
+      return changedPaths(loaded.editor.form, editor.form);
+    }
+    if (loaded.editor.kind === 'VelocityProxy' && editor.kind === 'VelocityProxy') {
+      // A document editor cannot name the fields that moved without parsing the
+      // text itself, which would mean a second parser disagreeing with the one
+      // that matters. "The document" is the honest granularity here.
+      return loaded.editor.text.trim() === editor.text.trim() ? [] : ['the document'];
+    }
+    return [];
+  }, [loaded, editor]);
 
   async function submit() {
-    if (busy || state === null || loaded === null) return;
+    if (busy || editor === null || loaded === null) return;
     setBusy(true);
     setViolations(null);
     setConflict(null);
     setError(null);
     try {
-      const { server } = await replaceServer(
-        name,
-        jsonBody(toDefinitionInput(state)),
-        loaded.etag,
-      );
+      const body =
+        editor.kind === 'PaperServer'
+          ? jsonBody(toDefinitionInput(editor.form))
+          : yamlBody(editor.text);
+      const { server } = await replaceServer(name, body, loaded.etag);
       merge(server);
       router.push(`/servers/${encodeURIComponent(name)}`);
     } catch (cause) {
@@ -92,7 +125,7 @@ export default function EditServerPage() {
         try {
           const { server, etag } = await getServer(name);
           setConflict({ detail, stored: server });
-          setLoaded({ form: fromDefinition(server.definition), etag });
+          setLoaded({ editor: editorFor(server.definition), etag });
         } catch {
           setConflict({ detail, stored: null });
         }
@@ -118,10 +151,84 @@ export default function EditServerPage() {
     );
   }
 
-  if (state === null || loaded === null) return <Spinner label={`reading ${name}`} />;
+  if (editor === null || loaded === null) return <Spinner label={`reading ${name}`} />;
 
   const terminating = live?.metadata.terminating ?? false;
   const online = live?.display.playersOnline ?? null;
+  const isProxy = editor.kind === 'VelocityProxy';
+
+  const header = (
+    <>
+      {terminating && (
+        <Note tone="work" title="this server is being deleted">
+          A delete is in flight for this name, so the API will refuse a write with a{' '}
+          <span className="mono">409 TERMINATING</span>. Nothing can be edited until the drain
+          finishes and the name is released.
+        </Note>
+      )}
+
+      {conflict !== null && (
+        <ConflictPanel
+          detail={conflict.detail}
+          stored={conflict.stored}
+          onTakeTheirs={() => {
+            if (conflict.stored === null) return;
+            setEditor(editorFor(conflict.stored.definition));
+            setConflict(null);
+          }}
+          onKeepMine={() => setConflict(null)}
+        />
+      )}
+
+      {error !== null && (
+        <Note tone="fault" title="the spec was not saved">
+          {error}
+        </Note>
+      )}
+
+      {dirty.length > 0 && !terminating && (
+        <Note tone="work" title="saving this drains the server and replaces it">
+          <p>
+            A spec change moves the generation, so the reconcile loop drains this{' '}
+            {isProxy ? 'proxy' : 'server'} before starting the replacement
+            {isProxy
+              ? ' — sealing it so no new player is routed in, and moving the ones already on it'
+              : ' — evacuating players and confirming a world save'}
+            .
+            {online !== null && online > 0 && (
+              <>
+                {' '}
+                <strong>
+                  {online} {online === 1 ? 'player is' : 'players are'} on it right now.
+                </strong>
+              </>
+            )}
+          </p>
+          <p className="mt-2">
+            Changing{' '}
+            {dirty.map((path, index) => (
+              <span key={path}>
+                {index > 0 && ', '}
+                <span className="mono" style={{ color: 'var(--text)' }}>
+                  {path}
+                </span>
+              </span>
+            ))}
+            .
+          </p>
+        </Note>
+      )}
+    </>
+  );
+
+  const footer = (
+    <>
+      <LinkButton href={`/servers/${encodeURIComponent(name)}`}>Cancel</LinkButton>
+      <span className="mono text-[11px]" style={{ color: 'var(--text-faint)' }}>
+        If-Match {loaded.etag}
+      </span>
+    </>
+  );
 
   return (
     <>
@@ -131,87 +238,42 @@ export default function EditServerPage() {
         </Link>
         <h1 className="mono text-[20px] font-semibold tracking-tight">edit {name}</h1>
         <p className="text-[13px]" style={{ color: 'var(--text-dim)' }}>
-          Editing the spec is how a server is replaced. There is no restart endpoint — a restart is
-          a drain plus a recreate, and the only honest way to ask for one is to change the spec and
-          let the loop converge on it.
+          Editing the spec is how a {isProxy ? 'proxy' : 'server'} is replaced. There is no restart
+          endpoint — a restart is a drain plus a recreate, and the only honest way to ask for one is
+          to change the spec and let the loop converge on it.
         </p>
       </header>
 
-      <DefinitionForm
-        state={state}
-        onChange={(next) => {
-          setState(next);
-          setViolations(null);
-        }}
-        onSubmit={() => void submit()}
-        submitLabel="Save spec"
-        busy={busy || terminating}
-        nameLocked
-        submitViolations={violations}
-        header={
-          <>
-            {terminating && (
-              <Note tone="work" title="this server is being deleted">
-                A delete is in flight for this name, so the API will refuse a write with a{' '}
-                <span className="mono">409 TERMINATING</span>. Nothing can be edited until the drain
-                finishes and the name is released.
-              </Note>
-            )}
-
-            {conflict !== null && (
-              <ConflictPanel
-                detail={conflict.detail}
-                stored={conflict.stored}
-                onTakeTheirs={() => {
-                  if (conflict.stored === null) return;
-                  setState(fromDefinition(conflict.stored.definition));
-                  setConflict(null);
-                }}
-                onKeepMine={() => setConflict(null)}
-              />
-            )}
-
-            {error !== null && <Note tone="fault" title="the spec was not saved">{error}</Note>}
-
-            {dirty.length > 0 && !terminating && (
-              <Note tone="work" title="saving this drains the server and replaces it">
-                <p>
-                  A spec change moves the generation, so the reconcile loop drains this server —
-                  evacuating players and confirming a world save — before starting the replacement.
-                  {online !== null && online > 0 && (
-                    <>
-                      {' '}
-                      <strong>
-                        {online} {online === 1 ? 'player is' : 'players are'} on it right now.
-                      </strong>
-                    </>
-                  )}
-                </p>
-                <p className="mt-2">
-                  Changing{' '}
-                  {dirty.map((path, index) => (
-                    <span key={path}>
-                      {index > 0 && ', '}
-                      <span className="mono" style={{ color: 'var(--text)' }}>
-                        {path}
-                      </span>
-                    </span>
-                  ))}
-                  .
-                </p>
-              </Note>
-            )}
-          </>
-        }
-        footer={
-          <>
-            <LinkButton href={`/servers/${encodeURIComponent(name)}`}>Cancel</LinkButton>
-            <span className="mono text-[11px]" style={{ color: 'var(--text-faint)' }}>
-              If-Match {loaded.etag}
-            </span>
-          </>
-        }
-      />
+      {editor.kind === 'PaperServer' ? (
+        <DefinitionForm
+          state={editor.form}
+          onChange={(form) => {
+            setEditor({ kind: 'PaperServer', form });
+            setViolations(null);
+          }}
+          onSubmit={() => void submit()}
+          submitLabel="Save spec"
+          busy={busy || terminating}
+          nameLocked
+          submitViolations={violations}
+          header={header}
+          footer={footer}
+        />
+      ) : (
+        <DocumentEditor
+          value={editor.text}
+          onChange={(text) => {
+            setEditor({ kind: 'VelocityProxy', text });
+            setViolations(null);
+          }}
+          onSubmit={() => void submit()}
+          submitLabel="Save spec"
+          busy={busy || terminating}
+          submitViolations={violations}
+          header={header}
+          footer={footer}
+        />
+      )}
     </>
   );
 }
@@ -262,7 +324,9 @@ function ConflictPanel({
       {stored !== null && (
         <p className="mt-2 text-[12px]">
           The stored definition is now at{' '}
-          <span className="mono">rv {detail.currentResourceVersion ?? stored.metadata.resourceVersion}</span>
+          <span className="mono">
+            rv {detail.currentResourceVersion ?? stored.metadata.resourceVersion}
+          </span>
           , written {relative(stored.metadata.updatedAt)}. This form has been re-armed with that
           version, so <em>Keep my edits and overwrite</em> will now succeed — and will discard
           whatever the other change was.

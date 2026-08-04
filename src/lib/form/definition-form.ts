@@ -1,6 +1,6 @@
 import type {
-  Definition,
-  DefinitionInput,
+  PaperServerDefinition,
+  PaperServerInput,
   PaperServerSpec,
   PaperServerSpecInput,
   StorageMode,
@@ -149,7 +149,7 @@ export function parseLabels(text: string): Record<string, string> | undefined {
  * refuses to start until the Minecraft EULA is accepted`), attached to
  * `spec.eulaAccepted`.
  */
-export type DefinitionDraft = Omit<DefinitionInput, 'spec'> & {
+export type DefinitionDraft = Omit<PaperServerInput, 'spec'> & {
   spec: Omit<PaperServerSpecInput, 'eulaAccepted'> & { eulaAccepted: boolean };
 };
 
@@ -237,8 +237,18 @@ export function toDefinitionInput(state: FormState): DefinitionDraft {
   };
 }
 
-/** Loads an existing (effective) definition back into the form for editing. */
-export function fromDefinition(definition: Definition): FormState {
+/**
+ * Loads an existing (effective) definition back into the structured form.
+ *
+ * `PaperServerDefinition`, not `Definition`: this form is built field by field
+ * against the Paper spec, and a `VelocityProxy` has a different shape entirely
+ * — no `paper`, no `storage`, no `eulaAccepted`, and a backend selector and
+ * control endpoint that have no counterpart here. Rather than grow a second
+ * field set that would be half-checked, a proxy is edited as a document (see
+ * `DocumentEditor`), which goes through the same `/validate`, the same
+ * per-field violation attachment and the same `If-Match`.
+ */
+export function fromDefinition(definition: PaperServerDefinition): FormState {
   const spec: PaperServerSpec = definition.spec;
   const values = { ...EMPTY_FORM.values };
 
