@@ -69,9 +69,12 @@ export const FALLBACK_DISPLAY_STATES = [
   'TERMINATING',
   'STOPPING',
   'STOPPED',
+  'DEGRADED',
   'FAILED',
+  'UNREADABLE',
   'UNKNOWN',
 ] as const;
 
 export const FALLBACK_STORAGE_MODES = ['persistent', 'ephemeral'] as const;
 export const FALLBACK_DRAIN_POLICIES = ['waitForZeroPlayers'] as const;
+export const FALLBACK_KINDS = ['PaperServer', 'VelocityProxy'] as const;

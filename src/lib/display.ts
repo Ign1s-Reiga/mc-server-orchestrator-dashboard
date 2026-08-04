@@ -42,6 +42,27 @@ const STATES: Record<DisplayState, StateFacts> = {
   STOPPING: { tone: 'work', meaning: 'the container is being stopped' },
   STOPPED: { tone: 'quiet', meaning: 'not running' },
   FAILED: { tone: 'fault', meaning: 'the reconcile loop could not converge' },
+  /*
+   * Up, accepting, and unable to do its job (§7). A fault because somebody has
+   * to act — the loop cannot fix a selector that matches nothing or a control
+   * endpoint that will not answer. `ready` stays true, deliberately, so the
+   * badge and `detail` are the only things carrying this.
+   */
+  DEGRADED: {
+    tone: 'fault',
+    meaning: 'accepting connections but unable to do its job — see the detail and conditions',
+  },
+  /*
+   * NOT `UNKNOWN`, and §7 is emphatic about why. `UNKNOWN` is a fact about the
+   * world: the node could not be reached, so go and look at the host.
+   * `UNREADABLE` is a fact about our own record: the container is very probably
+   * running exactly as it was, and what needs repairing is a row. An operator
+   * sent to the wrong one of those wastes an outage.
+   */
+  UNREADABLE: {
+    tone: 'fault',
+    meaning: 'the stored observation will not decode — the record is broken, most likely not the server',
+  },
   UNKNOWN: { tone: 'fault', meaning: 'the observed state could not be determined' },
 };
 
@@ -108,8 +129,11 @@ const CONDITION_ORDER: readonly ConditionType[] = [
   'CONTAINER_RUNNING',
   'READY',
   'DRAINING',
+  'DRAIN_BLOCKED',
   'PLAYERS_EVACUATED',
   'WORLD_SAVED',
+  'BACKENDS_RESOLVED',
+  'CONTROL_ENDPOINT_READY',
   'NEEDS_ATTENTION',
 ];
 
@@ -123,11 +147,56 @@ export function sortConditions<T extends { type: ConditionType }>(conditions: re
 
 export function conditionTone(type: ConditionType, status: ConditionStatus): Tone {
   if (type === 'NEEDS_ATTENTION') return status === 'TRUE' ? 'fault' : 'quiet';
+  // Capability conditions: only an explicitly FALSE one degrades (§7), so an
+  // UNKNOWN is genuinely "not looked yet" and must not read as a problem.
+  if (type === 'BACKENDS_RESOLVED' || type === 'CONTROL_ENDPOINT_READY') {
+    if (status === 'FALSE') return 'fault';
+    return status === 'TRUE' ? 'ok' : 'quiet';
+  }
+  // A block is the drain behaving correctly, so it is never painted as a fault.
+  if (type === 'DRAIN_BLOCKED') return status === 'TRUE' ? 'work' : 'quiet';
   if (type === 'DRAINING') return status === 'TRUE' ? 'work' : 'quiet';
   if (status === 'TRUE') return 'ok';
   if (status === 'UNKNOWN') return 'quiet';
   return 'neutral';
 }
+
+/**
+ * What to say about a drain that is not advancing, in §7's fixed order.
+ *
+ * `needsAttention` and `drainBlocked` are **ordered, not exclusive** — §7
+ * retracts an earlier claim that they were mutually exclusive, and names the
+ * case that broke it: a drain can be correctly waiting on players while its
+ * node is unreachable. When both are true the first wins, because it is the one
+ * with an action attached.
+ *
+ * There is deliberately no `status.failure` arm. §7 calls adding one a mistake
+ * worth naming: it re-derives "the loop has stopped moving this server" in
+ * TypeScript with no threshold, so every transient blip renders as a problem.
+ * The threshold lives in the condition, and `needsAttention` is how it arrives.
+ */
+export type DrainDisposition = 'needs-a-human' | 'waiting-for-players' | 'in-progress';
+
+export function drainDisposition(display: {
+  needsAttention: boolean;
+  drainBlocked: boolean;
+}): DrainDisposition {
+  if (display.needsAttention) return 'needs-a-human';
+  if (display.drainBlocked) return 'waiting-for-players';
+  return 'in-progress';
+}
+
+export const DRAIN_DISPOSITION_LABEL: Record<DrainDisposition, string> = {
+  'needs-a-human': 'needs a human',
+  'waiting-for-players': 'waiting for players',
+  'in-progress': 'in progress',
+};
+
+export const DRAIN_DISPOSITION_TONE: Record<DrainDisposition, Tone> = {
+  'needs-a-human': 'fault',
+  'waiting-for-players': 'work',
+  'in-progress': 'work',
+};
 
 /**
  * Whether the reconcile loop has caught up with the spec as written.

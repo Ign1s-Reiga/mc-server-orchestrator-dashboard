@@ -56,6 +56,49 @@ export function AttentionFlag({ title }: { title?: string }) {
 }
 
 /**
+ * §7: `unreadable` says *what is wrong*; `needsAttention` says *somebody must
+ * act*. Both are set for a row the store cannot decode, and they are not
+ * redundant — alert on the one, filter and label with the other — so this sits
+ * alongside the attention flag rather than instead of it.
+ */
+export function UnreadableFlag({ title }: { title?: string }) {
+  return (
+    <span
+      className="mono inline-flex items-center gap-1 text-[11px] px-1.5 border rounded-sm"
+      style={{ color: 'var(--fault)', borderColor: 'currentColor' }}
+      title={
+        title ??
+        'the stored state will not decode — a broken record, most likely not a broken server'
+      }
+    >
+      <span aria-hidden>⌗</span>
+      UNREADABLE
+    </span>
+  );
+}
+
+/**
+ * §7: the drain is parked and nothing is wrong — **do not act**.
+ *
+ * Painted as work rather than fault deliberately: players are still connected
+ * and the protocol is waiting rather than disconnecting anybody, which is the
+ * system behaving correctly. Rendered only when `needsAttention` is not also
+ * set — when both are true, the one with an action attached wins.
+ */
+export function DrainBlockedFlag({ title }: { title?: string }) {
+  return (
+    <span
+      className="mono inline-flex items-center gap-1 text-[11px] px-1.5 border rounded-sm"
+      style={{ color: 'var(--work)', borderColor: 'currentColor' }}
+      title={title ?? 'the drain is waiting for players to leave — nothing to do'}
+    >
+      <span aria-hidden>||</span>
+      WAITING
+    </span>
+  );
+}
+
+/**
  * Declared generation against observed generation.
  *
  * The clearest way to show the idea in §1: a write was recorded, and the world
