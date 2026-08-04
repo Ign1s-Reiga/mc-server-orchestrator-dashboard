@@ -4,7 +4,13 @@ import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { useFleet, useServer } from '@/components/fleet-provider';
-import { AttentionFlag, GenerationGauge, StateBadge } from '@/components/state-badge';
+import {
+  AttentionFlag,
+  DrainBlockedFlag,
+  GenerationGauge,
+  StateBadge,
+  UnreadableFlag,
+} from '@/components/state-badge';
 import { DrainRibbon } from '@/components/drain-ribbon';
 import { DeclaredPanel } from '@/components/declared-panel';
 import { ObservedPanel } from '@/components/observed-panel';
@@ -49,7 +55,15 @@ export default function ServerDetailPage() {
             <h1 className="mono text-[22px] font-semibold tracking-tight">{server.name}</h1>
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
               <StateBadge state={server.display.state} size="lg" />
+              {/* Flags, not states (§7). `TERMINATING` outranks all of them, so
+                  the badge alone cannot say a row is also unreadable or
+                  waiting. `drainBlocked` yields to `needsAttention` when both
+                  are set — the one with an action attached wins. */}
               {server.display.needsAttention && <AttentionFlag />}
+              {server.display.unreadable && <UnreadableFlag />}
+              {server.display.drainBlocked && !server.display.needsAttention && (
+                <DrainBlockedFlag />
+              )}
               <span className="mono text-[11px]" style={{ color: 'var(--text-faint)' }}>
                 {server.kind}
               </span>

@@ -3,12 +3,20 @@
 import Link from 'next/link';
 import { useMemo, useState } from 'react';
 import { useFleet, useNow } from '@/components/fleet-provider';
-import { AttentionFlag, GenerationGauge, StateBadge } from '@/components/state-badge';
+import {
+  AttentionFlag,
+  DrainBlockedFlag,
+  GenerationGauge,
+  StateBadge,
+  UnreadableFlag,
+} from '@/components/state-badge';
 import { DrainInline } from '@/components/drain-ribbon';
-import { Button, Empty, LinkButton, Panel, Spinner, cx } from '@/components/ui';
+import { ProxyInline } from '@/components/proxy-panels';
+import { Button, Empty, LinkButton, Note, Panel, Spinner, cx } from '@/components/ui';
 import { age } from '@/lib/display';
+import { filterChips } from '@/lib/filter-chips';
 import { FALLBACK_DISPLAY_STATES, useMeta } from '@/components/meta-provider';
-import type { DisplayState, ServerResource } from '@/lib/api/types';
+import type { DisplayState, ServerResource, UnreadableServer } from '@/lib/api/types';
 
 interface Filters {
   states: Set<DisplayState>;
@@ -47,6 +55,17 @@ export default function FleetPage() {
         </LinkButton>
       </header>
 
+      {fleet.removalsSuspended && (
+        <Note tone="work" title="removals are paused">
+          One of the unreadable rows below has no name at all, so the event stream has stopped
+          reporting removals — for every server, not just that one. A record with no name cannot be
+          matched against anything, and deriving a deletion anyway could report a running server as
+          gone. Until it is repaired, a genuinely purged server may linger in this table.
+        </Note>
+      )}
+
+      {fleet.unreadable.length > 0 && <UnreadablePanel rows={fleet.unreadable} />}
+
       <FilterBar filters={filters} onChange={setFilters} servers={servers} />
 
       <Panel>
@@ -68,6 +87,62 @@ export default function FleetPage() {
         </p>
       )}
     </>
+  );
+}
+
+/**
+ * Rows the store has a name for and nothing else (§6).
+ *
+ * These sit above the fleet table rather than inside it, which is what keeps
+ * them out of `items` without hiding them: a row with no readable definition
+ * cannot answer "is it READY", "does it carry this label" or "is it
+ * terminating", so any filter would drop it — and dropping it is exactly the
+ * mistake, because absence is how a purge is reported.
+ */
+function UnreadablePanel({ rows }: { rows: readonly UnreadableServer[] }) {
+  return (
+    <Panel
+      title={`${rows.length} unreadable ${rows.length === 1 ? 'row' : 'rows'}`}
+      hint="declared, and the stored definition will not decode — never filtered"
+    >
+      <ul>
+        {rows.map((row, index) => (
+          // Keyed by index, not by name: two nameless rows are indistinguishable
+          // to this API, so `name` is not a key.
+          <li key={`${row.name ?? 'nameless'}-${index}`} className="border-b last:border-b-0 px-4 py-3">
+            <div className="flex items-baseline gap-3 flex-wrap">
+              {row.name === null ? (
+                <span className="mono text-[13px]" style={{ color: 'var(--fault)' }}>
+                  (no name)
+                </span>
+              ) : (
+                <span className="mono text-[13px] font-medium">{row.name}</span>
+              )}
+              <UnreadableFlag />
+              <span className="mono text-[10px]" style={{ color: 'var(--text-faint)' }}>
+                {row.part.toLowerCase()} state{row.retryable ? ' · retryable' : ''}
+              </span>
+            </div>
+            <p className="text-[12px] mt-1" style={{ color: 'var(--text-dim)' }}>
+              {row.reason}
+            </p>
+            {row.name === null ? (
+              // Every repair path this API has names a server, so there is no
+              // button that could work. Saying so beats showing one that cannot.
+              <p className="text-[12px] mt-1" style={{ color: 'var(--fault)' }}>
+                This record has no name, so it cannot be fetched, repaired or deleted through the
+                API at all. It has to be fixed in the store.
+              </p>
+            ) : (
+              <p className="text-[12px] mt-1" style={{ color: 'var(--text-faint)' }}>
+                The container may well still be running. Repair the stored definition — the
+                reconcile loop reads the same bytes on every pass and cannot move this on its own.
+              </p>
+            )}
+          </li>
+        ))}
+      </ul>
+    </Panel>
   );
 }
 
@@ -113,15 +188,12 @@ function FilterBar({
     return counts;
   }, [servers]);
 
-  // Anything observed but not in the served list still gets a chip, so a badge
-  // this build has never heard of is filterable rather than invisible.
-  const states = [...known, ...[...present.keys()].filter((state) => !known.includes(state))];
-
+  const states = filterChips(known, present);
   const attention = servers.filter((server) => server.display.needsAttention).length;
 
   return (
     <div className="flex flex-wrap items-center gap-x-2 gap-y-2">
-      {states.filter((state) => present.has(state)).map((state) => {
+      {states.map((state) => {
         const on = filters.states.has(state);
         return (
           <button
@@ -197,22 +269,40 @@ function FleetTable({ servers }: { servers: readonly ServerResource[] }) {
                 <Link href={`/servers/${encodeURIComponent(server.name)}`} className="mono text-[13px] font-medium">
                   {server.name}
                 </Link>
-                {Object.keys(server.definition.metadata.labels ?? {}).length > 0 && (
-                  <div className="mono text-[10px] mt-0.5" style={{ color: 'var(--text-faint)' }}>
-                    {Object.entries(server.definition.metadata.labels ?? {})
+                <div className="mono text-[10px] mt-0.5" style={{ color: 'var(--text-faint)' }}>
+                  {server.kind === 'VelocityProxy' ? 'proxy' : 'server'}
+                  {Object.keys(server.definition.metadata.labels ?? {}).length > 0 &&
+                    ` · ${Object.entries(server.definition.metadata.labels ?? {})
                       .map(([key, value]) => `${key}=${value}`)
-                      .join(' ')}
-                  </div>
-                )}
+                      .join(' ')}`}
+                </div>
               </td>
               <td className="px-4 py-2.5">
                 <div className="flex items-center gap-2 flex-wrap">
                   <StateBadge state={server.display.state} />
+                  {/*
+                    Flags, not states (§7). They are rendered beside the badge
+                    because `TERMINATING` outranks all three, so the badge alone
+                    cannot say a row is also unreadable or waiting.
+
+                    `drainBlocked` is shown only when `needsAttention` is not —
+                    the two can both be true, and then the one with an action
+                    attached wins.
+                  */}
                   {server.display.needsAttention && <AttentionFlag />}
+                  {server.display.unreadable && <UnreadableFlag />}
+                  {server.display.drainBlocked && !server.display.needsAttention && (
+                    <DrainBlockedFlag />
+                  )}
                 </div>
                 {server.display.drainState !== null && (
                   <div className="mt-0.5">
                     <DrainInline server={server} />
+                  </div>
+                )}
+                {server.display.proxy !== null && (
+                  <div className="mt-0.5">
+                    <ProxyInline proxy={server.display.proxy} />
                   </div>
                 )}
               </td>
