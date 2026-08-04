@@ -1,6 +1,6 @@
 import { API_BASE, notifySessionLost } from '../api/client';
 import { toApiError } from '../api/errors';
-import type { ServerResource, StreamEvent } from '../api/types';
+import type { ServerResource, StreamEvent, UnreadableServer } from '../api/types';
 import { SseParser } from './sse';
 
 /**
@@ -27,6 +27,27 @@ export interface FleetSnapshot {
   readonly servers: ReadonlyMap<string, ServerResource>;
   /** Names sorted the way the API sorts its list. */
   readonly order: readonly string[];
+  /**
+   * Rows the store has a name for and whose *definition* will not decode, so
+   * there is no resource to render (§6).
+   *
+   * Kept rather than dropped, because absence is how a purge is reported:
+   * omitting one would silently report a deletion that never happened, on a
+   * server that may still be running with players on it. They are also never
+   * filtered — a row with no readable definition cannot answer "is it READY" or
+   * "does it carry this label", so any filter would drop it.
+   */
+  readonly unreadable: readonly UnreadableServer[];
+  /**
+   * True while any unreadable row has `name: null`.
+   *
+   * §8: in that situation the API stops emitting `removed` **for every row**,
+   * because a record with no name cannot be matched against anything and may be
+   * any server whose name column was nulled. A genuinely purged server then
+   * lingers in this table until the row is repaired or the connection cycles
+   * into a fresh snapshot — so the operator has to be told.
+   */
+  readonly removalsSuspended: boolean;
   readonly connection: ConnectionState;
   /** Whether a snapshot has ever arrived. Distinguishes "empty fleet" from "no data yet". */
   readonly primed: boolean;
@@ -61,6 +82,8 @@ export interface FleetSnapshot {
 const EMPTY: FleetSnapshot = {
   servers: new Map(),
   order: [],
+  unreadable: [],
+  removalsSuspended: false,
   connection: 'idle',
   primed: false,
   lastFrameAt: null,
@@ -415,9 +438,13 @@ export class FleetStore {
           // periodic re-snapshot does not re-render the whole dashboard.
           servers.set(item.name, existing !== undefined && sameVersion(existing, item) ? existing : item);
         }
+        // A snapshot re-states everything, unreadable rows included.
+        const unreadable = event.data.unreadable ?? [];
         this.set({
           servers,
           order: [...servers.keys()].sort(),
+          unreadable,
+          removalsSuspended: unreadable.some((row) => row.name === null),
           primed: true,
           cursor: event.data.cursor,
           lastDataAt: Date.now(),
@@ -426,23 +453,70 @@ export class FleetStore {
         return;
       }
       case 'updated': {
+        // A row that starts decoding again arrives as an ordinary `updated`
+        // with the full resource, so this is also where an unreadable mark is
+        // cleared.
+        const stillUnreadable = this.snapshot.unreadable.filter(
+          (row) => row.name !== event.data.name,
+        );
+        const clearedMark = stillUnreadable.length !== this.snapshot.unreadable.length;
+
         const existing = this.snapshot.servers.get(event.data.name);
-        if (existing !== undefined && sameVersion(existing, event.data.server)) {
+        if (existing !== undefined && sameVersion(existing, event.data.server) && !clearedMark) {
           this.set({ lastDataAt: Date.now() });
           return;
         }
         const servers = new Map(this.snapshot.servers);
         servers.set(event.data.name, event.data.server);
-        this.set({ servers, order: [...servers.keys()].sort(), lastDataAt: Date.now() });
+        this.set({
+          servers,
+          order: [...servers.keys()].sort(),
+          unreadable: clearedMark ? stillUnreadable : this.snapshot.unreadable,
+          removalsSuspended: stillUnreadable.some((row) => row.name === null),
+          lastDataAt: Date.now(),
+        });
+        return;
+      }
+      case 'unreadable': {
+        // §8: emphatically NOT `removed`. The server was declared, its container
+        // may well be up with players on it, and treating this as a deletion is
+        // the failure this event exists to prevent. The row keeps whatever this
+        // client last knew about it, with an error badge on top.
+        const row = event.data;
+        const rest = this.snapshot.unreadable.filter(
+          (existing) => existing.name === null || existing.name !== row.name,
+        );
+        const unreadable = row.name === null ? [...this.snapshot.unreadable, row] : [...rest, row];
+        this.set({
+          unreadable,
+          removalsSuspended: unreadable.some((entry) => entry.name === null),
+          lastDataAt: Date.now(),
+        });
         return;
       }
       case 'removed': {
         // The drain finished and `:core` freed the name. This — not the 202
         // from DELETE — is when a row is allowed to disappear.
-        if (!this.snapshot.servers.has(event.data.name)) return;
+        const unreadable = this.snapshot.unreadable.filter((row) => row.name !== event.data.name);
+        if (!this.snapshot.servers.has(event.data.name)) {
+          if (unreadable.length !== this.snapshot.unreadable.length) {
+            this.set({
+              unreadable,
+              removalsSuspended: unreadable.some((row) => row.name === null),
+              lastDataAt: Date.now(),
+            });
+          }
+          return;
+        }
         const servers = new Map(this.snapshot.servers);
         servers.delete(event.data.name);
-        this.set({ servers, order: [...servers.keys()].sort(), lastDataAt: Date.now() });
+        this.set({
+          servers,
+          order: [...servers.keys()].sort(),
+          unreadable,
+          removalsSuspended: unreadable.some((row) => row.name === null),
+          lastDataAt: Date.now(),
+        });
         return;
       }
       case 'expired': {
