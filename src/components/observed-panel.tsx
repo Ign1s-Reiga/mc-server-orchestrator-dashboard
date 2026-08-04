@@ -1,9 +1,10 @@
 'use client';
 
-import type { FailureStatus, ServerResource } from '@/lib/api/types';
+import type { FailureStatus, ServerResource, VelocityProxyStatus } from '@/lib/api/types';
 import { absolute, age, relative } from '@/lib/display';
 import { useNow } from './fleet-provider';
 import { Empty, Field, Nil, Note, Panel } from './ui';
+import { BackendsPanel, ControlEndpointField } from './proxy-panels';
 
 /**
  * Observed state — what the reconcile loop has actually seen.
@@ -12,12 +13,38 @@ import { Empty, Field, Nil, Note, Panel } from './ui';
  * `null` renders as an em dash rather than as a zero or a blank. "0 players"
  * and "we have never looked" are different facts and an operator has to be
  * able to tell them apart.
+ *
+ * `status` is a union tagged by `kind`. The common half is rendered once; the
+ * kind-specific half is `storage` for a Paper server and `backends`/`control`
+ * for a proxy.
  */
 export function ObservedPanel({ server }: { server: ServerResource }) {
   const now = useNow();
   const status = server.status;
 
   if (status === null) {
+    // §6: `status: null` has two meanings and they call for opposite things
+    // from an operator — one you wait out, one you fix. `neverObserved` is the
+    // discriminator; testing `status === null` alone keeps working and keeps
+    // being wrong in the second case.
+    if (server.unreadable !== null) {
+      return (
+        <Panel title="observed" hint="the stored observation will not decode">
+          <div className="p-4">
+            <Note tone="fault" title={`unreadable ${server.unreadable.part.toLowerCase()} state`}>
+              <p>{server.unreadable.reason}</p>
+              <p className="mt-2">
+                This is a fact about the record, not about the container. The workload is most
+                likely running exactly as it was — what needs repairing is the stored row, in the
+                store. The reconcile loop reads the same bytes on every pass, so it cannot move this
+                server on its own
+                {!server.unreadable.retryable && ' and re-reading will not help'}.
+              </p>
+            </Note>
+          </div>
+        </Panel>
+      );
+    }
     return (
       <Panel title="observed" hint="status">
         <div className="px-4 py-8 text-center">
@@ -87,23 +114,32 @@ export function ObservedPanel({ server }: { server: ServerResource }) {
               </>
             )}
           </Field>
-          <Field label="storage">
-            {status.storage === null ? (
-              <Nil />
-            ) : (
-              <>
-                {status.storage.persistent ? 'persistent' : 'ephemeral'}
-                {status.storage.volumeName !== null && ` · ${status.storage.volumeName}`}
-                <div className="text-[11px] mt-0.5" style={{ color: 'var(--text-faint)' }}>
-                  {status.storage.bound ? 'bound' : 'not bound'}
-                  {' · last confirmed save '}
-                  {status.storage.lastSaveConfirmedAt === null
-                    ? 'never'
-                    : relative(status.storage.lastSaveConfirmedAt, now)}
-                </div>
-              </>
-            )}
-          </Field>
+          {/*
+            The kind-specific slot. A proxy has no `storage` at all — not a null
+            one — so this branches on the discriminant rather than reaching for
+            a field that does not exist on the union.
+          */}
+          {status.kind === 'VelocityProxy' ? (
+            <ControlEndpointField control={status.control} />
+          ) : (
+            <Field label="storage">
+              {status.storage === null ? (
+                <Nil />
+              ) : (
+                <>
+                  {status.storage.persistent ? 'persistent' : 'ephemeral'}
+                  {status.storage.volumeName !== null && ` · ${status.storage.volumeName}`}
+                  <div className="text-[11px] mt-0.5" style={{ color: 'var(--text-faint)' }}>
+                    {status.storage.bound ? 'bound' : 'not bound'}
+                    {' · last confirmed save '}
+                    {status.storage.lastSaveConfirmedAt === null
+                      ? 'never'
+                      : relative(status.storage.lastSaveConfirmedAt, now)}
+                  </div>
+                </>
+              )}
+            </Field>
+          )}
 
           <Field label="container">
             {status.runtime === null ? (
@@ -147,9 +183,16 @@ export function ObservedPanel({ server }: { server: ServerResource }) {
         </div>
       </Panel>
 
+      {status.kind === 'VelocityProxy' && <BackendsPanel status={status} />}
+
       {status.failure !== null && <FailurePanel failure={status.failure} />}
     </div>
   );
+}
+
+/** Narrowing helper, so callers can ask for the proxy view without a cast. */
+export function asProxyStatus(server: ServerResource): VelocityProxyStatus | null {
+  return server.status !== null && server.status.kind === 'VelocityProxy' ? server.status : null;
 }
 
 /**

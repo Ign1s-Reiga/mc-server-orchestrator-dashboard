@@ -44,23 +44,43 @@ export function DrainRibbon({ server }: { server: ServerResource }) {
     );
   }
 
-  const failed = drain.state === 'DRAIN_FAILED';
-  const currentIndex = failed ? -1 : drainStepIndex(drain.state);
+  /*
+   * §7/§14: `DRAIN_FAILED` means *parked*, not *broken* — a drain that is not
+   * advancing reports it whether it is stuck or merely waiting. `blocked` and
+   * `failure` are what tell those apart, and they are disjoint:
+   *
+   *   progressing        blocked null   failure null
+   *   blocked, healthy   blocked set    failure null
+   *   failed             blocked null   failure set
+   *
+   * Painting a waiting drain as a failure was this component's own bug. A
+   * blocked drain records no failure precisely so a server with people happily
+   * playing on it does not light up every "is anything wrong" panel.
+   */
+  const aborted = drain.failure !== null;
+  const blocked = !aborted && drain.blocked !== null;
+  const currentIndex = drain.state === 'DRAIN_FAILED' ? -1 : drainStepIndex(drain.state);
+  const accent = aborted ? 'var(--fault)' : 'var(--work)';
 
   return (
     <div
       className="border rounded-sm overflow-hidden"
-      style={{ background: 'var(--bg-raised)', borderColor: failed ? 'var(--fault)' : 'var(--line)' }}
+      style={{
+        background: 'var(--bg-raised)',
+        borderColor: aborted ? 'var(--fault)' : 'var(--line)',
+      }}
     >
       <header className="flex flex-wrap items-baseline gap-x-4 gap-y-1 px-4 py-2.5 border-b">
-        <h2 className="label" style={{ color: failed ? 'var(--fault)' : 'var(--work)' }}>
-          {failed ? 'drain failed' : 'draining'}
+        <h2 className="label" style={{ color: accent }}>
+          {aborted ? 'drain failed' : blocked ? 'drain waiting' : 'draining'}
         </h2>
-        <span className="mono text-[13px] font-medium" style={{ color: failed ? 'var(--fault)' : 'var(--work)' }}>
+        <span className="mono text-[13px] font-medium" style={{ color: accent }}>
           {drain.state}
         </span>
         <p className="text-[13px] flex-1" style={{ color: 'var(--text-dim)' }}>
-          {DRAIN_STEP_MEANING[drain.state]}
+          {blocked && drain.blocked !== null
+            ? drain.blocked.message
+            : DRAIN_STEP_MEANING[drain.state]}
         </p>
         <span className="mono text-[11px]" style={{ color: 'var(--text-faint)' }}>
           started {age(drain.startedAt, now)} ago · in this step {age(drain.enteredStateAt, now)}
@@ -68,15 +88,37 @@ export function DrainRibbon({ server }: { server: ServerResource }) {
       </header>
 
       <div className="px-4 pt-4 pb-3">
-        <Track currentIndex={currentIndex} failed={failed} />
+        <Track currentIndex={currentIndex} failed={aborted} />
         <Latches drain={drain} now={now} />
       </div>
 
-      {failed && (
+      {blocked && drain.blocked !== null && (
+        <div className="px-4 pb-4">
+          <Note tone="work" title="waiting, not stuck — there is nothing to do">
+            <p>
+              The drain has stopped advancing because players are still connected and there is no
+              proxy to move them through, so the protocol waits rather than disconnecting anybody.
+              The container keeps running and the server stays joinable.
+            </p>
+            <p className="mono text-[11px] mt-2" style={{ color: 'var(--text-faint)' }}>
+              {drain.blocked.reason} · blocked for {age(drain.blocked.since, now)} ·{' '}
+              {drain.blocked.observations} pass
+              {drain.blocked.observations === 1 ? '' : 'es'} found it still true
+            </p>
+            <p className="text-[12px] mt-1.5">
+              The pass count is what says the loop is still watching rather than wedged. A pass that
+              fails leaves the block untouched and records on the server&apos;s failure instead — so
+              read that alongside this rather than taking a block as permission to ignore the row.
+            </p>
+          </Note>
+        </div>
+      )}
+
+      {aborted && (
         <div className="px-4 pb-4">
           <Note tone="fault" title="the server is still running">
             The drain aborted part-way. There is no path from here to a stop and no endpoint that
-            could force one — that is the point of the drain protocol. Whatever blocked it has to be
+            could force one — that is the point of the drain protocol. Whatever stopped it has to be
             resolved on the host, and the players on this server are still connected.
           </Note>
         </div>
@@ -222,14 +264,27 @@ export function DrainInline({ server }: { server: ServerResource }) {
   const now = useNow();
   const drain = server.status?.drain ?? null;
   if (drain === null) return null;
-  const failed = drain.state === 'DRAIN_FAILED';
+
+  // A parked drain and a broken one both report `DRAIN_FAILED`, so the state
+  // alone cannot answer the only question an operator has about the row. The
+  // elapsed time comes from `blocked.since` when there is one, because that is
+  // when the block was first recorded rather than when the loop last looked.
+  const aborted = drain.failure !== null;
+  const blocked = !aborted && drain.blocked !== null;
+  const since = blocked && drain.blocked !== null ? drain.blocked.since : drain.enteredStateAt;
+
   return (
     <span
       className="mono text-[11px] whitespace-nowrap"
-      style={{ color: failed ? 'var(--fault)' : 'var(--work)' }}
-      title={DRAIN_STEP_MEANING[drain.state]}
+      style={{ color: aborted ? 'var(--fault)' : 'var(--work)' }}
+      title={
+        blocked && drain.blocked !== null
+          ? drain.blocked.message
+          : DRAIN_STEP_MEANING[drain.state]
+      }
     >
-      {drain.state} {age(drain.enteredStateAt, now)}
+      {blocked && drain.blocked !== null ? drain.blocked.reason : drain.state}{' '}
+      {age(since, now)}
     </span>
   );
 }
