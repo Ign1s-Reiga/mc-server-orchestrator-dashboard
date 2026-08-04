@@ -66,14 +66,19 @@ function serverFixture(name: string, resourceVersion: string): ServerResource {
     },
     status: null,
     statusMeta: null,
+    unreadable: null,
     caughtUp: false,
+    neverObserved: true,
     display: {
       state: 'PENDING',
       ready: false,
       needsAttention: false,
+      unreadable: false,
+      drainBlocked: false,
       drainState: null,
       playersOnline: null,
       playersMax: 20,
+      proxy: null,
       detail: '',
     },
   };
@@ -107,7 +112,7 @@ async function connectLive(
   await settle();
   stream.sendRetryPreamble(3000);
   stream.send('hello', helloPayload({ keepAliveMillis: options.keepAliveMillis ?? KEEP_ALIVE }), '1');
-  stream.send('snapshot', { cursor: '1', count: 1, items: [serverFixture('survival-01', '1')] }, '1');
+  stream.send('snapshot', { cursor: '1', count: 1, items: [serverFixture('survival-01', '1')], unreadableCount: 0, unreadable: [] }, '1');
   await settle();
 }
 
@@ -252,6 +257,114 @@ describe('reconnect policy', () => {
     expect(fetcher.calls).toHaveLength(2);
     expect(store.getSnapshot().attempt).toBe(0);
     expect(fetcher.calls[1]).toContain('cursor=4');
+  });
+});
+
+describe('unreadable rows', () => {
+  it('marks a row unreadable without ever deleting it', async () => {
+    // §8: the `unreadable` event is emphatically NOT `removed`. The server was
+    // declared, its container may well be up with players on it, and treating
+    // it as a deletion is the failure the event exists to prevent.
+    const fetcher = new FakeFetch();
+    const stream = new FakeStream();
+    await connectLive(fetcher, stream);
+    expect(store.getSnapshot().servers.has('survival-01')).toBe(true);
+
+    stream.send(
+      'unreadable',
+      { name: 'survival-01', part: 'DESIRED', reason: 'stored definition will not decode', retryable: false },
+      '20',
+    );
+    await settle();
+
+    const snapshot = store.getSnapshot();
+    expect(snapshot.servers.has('survival-01')).toBe(true); // the row survives
+    expect(snapshot.unreadable).toHaveLength(1);
+    expect(snapshot.unreadable[0]?.name).toBe('survival-01');
+    expect(snapshot.removalsSuspended).toBe(false);
+  });
+
+  it('clears the mark when the row starts decoding again', async () => {
+    const fetcher = new FakeFetch();
+    const stream = new FakeStream();
+    await connectLive(fetcher, stream);
+
+    stream.send(
+      'unreadable',
+      { name: 'survival-01', part: 'OBSERVED', reason: 'nope', retryable: false },
+      '20',
+    );
+    await settle();
+    expect(store.getSnapshot().unreadable).toHaveLength(1);
+
+    // §8: "If it starts decoding again, an ordinary `updated` follows with the
+    // full resource."
+    stream.send(
+      'updated',
+      { name: 'survival-01', reason: 'definition', server: serverFixture('survival-01', '9') },
+      '21',
+    );
+    await settle();
+    expect(store.getSnapshot().unreadable).toHaveLength(0);
+  });
+
+  it('reports removals as suspended while a nameless row exists', async () => {
+    // §8: while any unreadable row has `name: null` the API stops emitting
+    // `removed` for EVERY row, because a record with no name may be any server
+    // whose name column was nulled. A purged server then lingers — so the
+    // operator has to be told rather than left with a table quietly going stale.
+    const fetcher = new FakeFetch();
+    const stream = new FakeStream();
+    await connectLive(fetcher, stream);
+
+    stream.send(
+      'unreadable',
+      { name: null, part: 'DESIRED', reason: 'the record has no name', retryable: false },
+      '20',
+    );
+    await settle();
+
+    expect(store.getSnapshot().removalsSuspended).toBe(true);
+    expect(store.getSnapshot().unreadable[0]?.name).toBeNull();
+  });
+
+  it('keeps two nameless rows apart instead of collapsing them', async () => {
+    // They are indistinguishable to the API, so they cannot be keyed by name —
+    // and collapsing them would under-report how many rows need repairing.
+    const fetcher = new FakeFetch();
+    const stream = new FakeStream();
+    await connectLive(fetcher, stream);
+
+    for (const reason of ['first bad row', 'second bad row']) {
+      stream.send('unreadable', { name: null, part: 'DESIRED', reason, retryable: false }, '20');
+      await settle();
+    }
+    expect(store.getSnapshot().unreadable).toHaveLength(2);
+  });
+
+  it('takes unreadable rows from a snapshot', async () => {
+    const fetcher = new FakeFetch();
+    const stream = new FakeStream();
+    fetcher.queueStream(stream);
+    fetcher.install();
+    store.start();
+    await settle();
+    stream.send('hello', helloPayload({ keepAliveMillis: KEEP_ALIVE }), '1');
+    stream.send(
+      'snapshot',
+      {
+        cursor: '1',
+        count: 1,
+        items: [serverFixture('survival-01', '1')],
+        unreadableCount: 1,
+        unreadable: [{ name: 'broken-01', part: 'DESIRED', reason: 'bad row', retryable: false }],
+      },
+      '1',
+    );
+    await settle();
+
+    expect(store.getSnapshot().unreadable).toHaveLength(1);
+    expect(store.getSnapshot().servers.size).toBe(1);
   });
 });
 

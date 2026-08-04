@@ -72,7 +72,9 @@ export function helloPayload(options: HelloOptions = {}) {
 }
 
 export function errorBody(code: ApiError['error']['code'], message: string): ApiError {
-  return { error: { code, message, retryable: false, violations: null, conflict: null } };
+  return {
+    error: { code, message, retryable: false, violations: null, conflict: null, unreadable: null },
+  };
 }
 
 /**
