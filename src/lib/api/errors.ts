@@ -1,4 +1,7 @@
-import type { ApiError, ConflictDetail, ErrorCode, Violation } from './types';
+import type { ApiError, ConflictDetail, ErrorCode, Unreadable, Violation } from './types';
+
+/** The `unreadable` payload on a `SERVER_UNREADABLE`, plus the row's name. */
+export type UnreadableDetail = Unreadable & { name: string | null };
 
 /**
  * Every non-2xx answer from the API, in one shape (§3).
@@ -12,6 +15,13 @@ export class ApiRequestError extends Error {
   readonly retryable: boolean;
   readonly violations: Violation[] | null;
   readonly conflict: ConflictDetail | null;
+  /**
+   * Set on `SERVER_UNREADABLE` (§3): the stored row will not decode.
+   *
+   * Explicitly **not evidence about the container** — the workload is very
+   * probably running exactly as it was, and what needs repairing is a record.
+   */
+  readonly unreadable: UnreadableDetail | null;
   /** From the `ETag` header — present on 409, carrying the current version. */
   readonly etag: string | null;
   /** Seconds, from `Retry-After` on the two retryable 503s. */
@@ -24,6 +34,7 @@ export class ApiRequestError extends Error {
     retryable?: boolean;
     violations?: Violation[] | null;
     conflict?: ConflictDetail | null;
+    unreadable?: UnreadableDetail | null;
     etag?: string | null;
     retryAfterSeconds?: number | null;
   }) {
@@ -34,9 +45,21 @@ export class ApiRequestError extends Error {
     this.retryable = init.retryable ?? false;
     this.violations = init.violations ?? null;
     this.conflict = init.conflict ?? null;
+    this.unreadable = init.unreadable ?? null;
     this.etag = init.etag ?? null;
     this.retryAfterSeconds = init.retryAfterSeconds ?? null;
   }
+}
+
+/**
+ * 500 `SERVER_UNREADABLE` — the stored row will not decode, so there is no
+ * resource to send. Deliberately not a 404: that would say the server is gone
+ * when it may still be running with players on it.
+ */
+export function isServerUnreadable(
+  value: unknown,
+): value is ApiRequestError & { unreadable: UnreadableDetail } {
+  return isApiError(value) && value.code === 'SERVER_UNREADABLE' && value.unreadable !== null;
 }
 
 export function isApiError(value: unknown): value is ApiRequestError {
@@ -103,6 +126,7 @@ export async function toApiError(response: Response): Promise<ApiRequestError> {
       retryable: error.retryable,
       violations: error.violations,
       conflict: error.conflict,
+      unreadable: error.unreadable ?? null,
       etag,
       retryAfterSeconds,
     });
@@ -140,6 +164,12 @@ export function describeError(error: unknown): string {
       }`;
     case 'PRECONDITION_REQUIRED':
       return 'this write needs the version it is replacing';
+    case 'SERVER_UNREADABLE':
+      // Say what is broken. The container is probably fine; the record is not,
+      // and sending an operator to the host would waste an outage.
+      return error.unreadable !== null
+        ? `${error.unreadable.reason} — the stored record is broken, most likely not the server`
+        : error.message;
     default:
       return error.message;
   }
