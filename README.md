@@ -85,15 +85,49 @@ src/
     api/v1/[...path]/route.ts     reverse proxy to the orchestrator
     api/healthz/route.ts          proxied liveness, for the sign-in screen
   lib/
-    api/types.ts                  API.md §14, transcribed
+    api/types.ts                  API.md §14, transcribed (both kinds)
     api/client.ts                 typed calls, ETag/CSRF/If-Match handling
     api/errors.ts                 the §3 error taxonomy
     stream/sse.ts                 SSE frame parser
     stream/store.ts               the live fleet, and connection honesty
     form/definition-form.ts       form state keyed by the API's field paths
     display.ts                    how derived values are painted
+    filter-chips.ts               which state chips the filter bar offers
   components/                     shell, panels, the drain ribbon, forms
+    proxy-panels.tsx              backend routing and the control endpoint
+    document-editor.tsx           the definition editor for non-Paper kinds
 ```
+
+### Two kinds, one set of routes
+
+`definition` and `status` are unions tagged by `kind`, returned from the same routes — there is no
+`/proxies`. A `PaperServer` has `storage`; a `VelocityProxy` has `backends` and `control` and **no
+storage at all**, not a null one. Everything here branches on the discriminant rather than reaching
+for a field that does not exist on the union.
+
+The proxy detail page is where a drain becomes visible across the fleet: a backend moves
+`REGISTERED` → `SEALED` (no new logins) → `DEREGISTERED`, and its player count falling to zero in
+between is the drain working. Two states are kept carefully apart there — `backends: null` means
+nothing has looked yet, `backends` present with `matched: 0` means the selector matched nothing and
+the proxy is routing players nowhere. The first resolves itself; the second needs a human.
+
+Proxies are created and edited as a **document** rather than through the structured form. §5 sends
+JSON and YAML through one parser and reports a line and column into the text as sent, so a
+hand-written document gets violations pointing at the exact line typed — better than a second field
+set that would be half-checked. Live `/validate`, `If-Match` and the 409 recovery are shared.
+
+### Rows that will not decode
+
+`status: null` has two meanings — "not observed yet" and "what was written down is corrupt" — and
+only `neverObserved` tells them apart. A corrupt *observation* still returns a resource, badged
+`UNREADABLE`. A corrupt *definition* has no resource at all and arrives in the list's separate
+`unreadable` array, or as an `unreadable` stream event.
+
+Those rows are never dropped and never filtered. Absence is how a purge is reported, so omitting one
+would silently report a deletion that never happened on a server that may still be running. A row
+with `name: null` is shown with no action at all — every repair path this API has names a server —
+and while one exists the API stops emitting `removed` for *every* row, so the fleet page says
+removals are paused rather than letting the table go quietly stale.
 
 ### Three decisions worth knowing about
 
@@ -168,4 +202,9 @@ found the reconnect-spin bug and the 401-propagation gap in the first place.
 - **No secret can be read back.** `GET` on a secret value is `405`, always. There is no reveal, no
   export, no preview.
 - **No player identity, anywhere.** The API exposes counts only, and there is no field an identity
-  could live in.
+  could live in. That includes the proxy's per-backend view, which sees every player in the fleet
+  and reports none of them.
+- **A waiting drain is not a failed one.** `DRAIN_FAILED` means *parked*, not *broken*;
+  `drain.blocked` and `drain.failure` are disjoint and tell them apart. A blocked drain records no
+  failure at all, so a server with people happily playing on it does not light up every
+  "is anything wrong" panel.
