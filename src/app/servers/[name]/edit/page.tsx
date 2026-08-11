@@ -13,6 +13,7 @@ import {
   type FormState,
 } from '@/lib/form/definition-form';
 import {
+  EMPTY_PROXY_FORM,
   changedProxyPaths,
   fromProxyDefinition,
   toProxyInput,
@@ -44,15 +45,30 @@ type Editor =
   | { kind: 'PaperServer'; form: FormState }
   | { kind: 'VelocityProxy'; mode: 'form' | 'document'; form: ProxyFormState; text: string };
 
+/**
+ * Reading a definition into a form must never be able to take the page down.
+ *
+ * `fromProxyDefinition` walks the *effective* shape §14 describes and reads
+ * required fields directly. Response bodies are not validated at runtime — the
+ * client parses and asserts — so an orchestrator that omits one, or a build of
+ * this app that is behind the schema, would throw here. Before there was a form
+ * this could not happen: the proxy branch was a `JSON.stringify`.
+ *
+ * Falling back to the document editor is the whole point. It is the editor that
+ * exists to survive exactly this, so a definition it cannot map to fields is
+ * the moment it is most needed — not the moment to show a load error over the
+ * top of it.
+ */
 function editorFor(definition: Definition): Editor {
-  return definition.kind === 'VelocityProxy'
-    ? {
-        kind: 'VelocityProxy',
-        mode: 'form',
-        form: fromProxyDefinition(definition),
-        text: JSON.stringify(definition, null, 2),
-      }
-    : { kind: 'PaperServer', form: fromDefinition(definition) };
+  if (definition.kind !== 'VelocityProxy') {
+    return { kind: 'PaperServer', form: fromDefinition(definition) };
+  }
+  const text = JSON.stringify(definition, null, 2);
+  try {
+    return { kind: 'VelocityProxy', mode: 'form', form: fromProxyDefinition(definition), text };
+  } catch {
+    return { kind: 'VelocityProxy', mode: 'document', form: EMPTY_PROXY_FORM, text };
+  }
 }
 
 export default function EditServerPage() {
@@ -298,11 +314,22 @@ export default function EditServerPage() {
           header={header}
           footer={footer}
           onSwitchToDocument={() => {
-            // Seeded from the form, so nothing edited is lost on the way over.
+            // An untouched form hands over the document that was *loaded*, not
+            // a re-serialisation of itself. The two differ in key order and in
+            // which optional keys appear, so re-serialising would make `dirty`
+            // report "the document" for zero edits — and a replace warning that
+            // fires when nothing changed is one an operator learns to ignore.
+            const origin = loaded.editor;
+            const untouched =
+              origin.kind === 'VelocityProxy' &&
+              changedProxyPaths(origin.form, editor.form).length === 0;
             setEditor({
               ...editor,
               mode: 'document',
-              text: JSON.stringify(toProxyInput(editor.form), null, 2),
+              text:
+                untouched && origin.kind === 'VelocityProxy'
+                  ? origin.text
+                  : JSON.stringify(toProxyInput(editor.form), null, 2),
             });
             setViolations(null);
           }}

@@ -9,6 +9,7 @@ import type { Kind, ServerResource, Violation } from '@/lib/api/types';
 import { EMPTY_FORM, parseLabels, toDefinitionInput, type FormState } from '@/lib/form/definition-form';
 import {
   EMPTY_PROXY_FORM,
+  changedProxyPaths,
   toProxyInput,
   type ProxyFormState,
 } from '@/lib/form/proxy-form';
@@ -330,10 +331,16 @@ function NewServerForm({ backendOf }: { backendOf: string | null }) {
           header={header}
           footer={<LinkButton href="/">Cancel</LinkButton>}
           onSwitchToDocument={() => {
-            // Seeded from the form so nothing typed is lost. The reverse is not
-            // offered as a conversion: reading YAML back would mean a second
-            // parser in this app disagreeing with the one that decides.
-            setDocument(JSON.stringify(toProxyInput(proxyForm), null, 2));
+            // Seeded from the form so nothing typed is lost — but only if
+            // anything *was* typed. Switching is now the only way into this
+            // editor, so seeding unconditionally would replace the annotated
+            // skeleton with a stub of empty strings and leave no route back to
+            // it. The reverse direction is not offered as a conversion at all:
+            // reading YAML back would mean a second parser in this app
+            // disagreeing with the one that decides.
+            if (changedProxyPaths(EMPTY_PROXY_FORM, proxyForm).length > 0) {
+              setDocument(JSON.stringify(toProxyInput(proxyForm), null, 2));
+            }
             setProxyMode('document');
             setViolations(null);
           }}

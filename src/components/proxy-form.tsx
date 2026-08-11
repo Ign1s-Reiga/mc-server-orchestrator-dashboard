@@ -11,6 +11,7 @@ import {
   PROXY_KNOWN_PATHS,
   asViolation,
   parseList,
+  proxyInputProblems,
   proxyInvariantProblems,
   toProxyInput,
   type ProxyFormState,
@@ -20,13 +21,14 @@ import { useFleet } from './fleet-provider';
 import {
   AreaField,
   EffectivePreview,
+  ProblemList,
   Section,
   TextField,
   ViolationSummary,
   type FieldContext,
 } from './form-fields';
 import { FALLBACK_DRAIN_POLICIES, useMeta } from './meta-provider';
-import { Button, Note, Panel } from './ui';
+import { Button, Note } from './ui';
 
 /**
  * The structured editor for a `VelocityProxy`.
@@ -150,7 +152,7 @@ export function ProxyForm({
     // wins wherever it has spoken, and the local copy only fills the gap before
     // the debounce lands — otherwise the field carries the same sentence twice.
     const spoken = new Set((active ?? []).map((violation) => violation.field));
-    const local = proxyInvariantProblems(state)
+    const local = [...proxyInvariantProblems(state), ...proxyInputProblems(state)]
       .filter((problem) => !spoken.has(problem.path))
       .map(asViolation);
     if (active === null) {
@@ -191,7 +193,8 @@ export function ProxyForm({
           path="metadata.name"
           label="name"
           required
-          className={nameLocked ? 'opacity-60 pointer-events-none' : undefined}
+          readOnly={nameLocked}
+          className={nameLocked ? 'opacity-60' : undefined}
           help={
             nameLocked
               ? 'Renaming is a create and a delete, not an edit — the old proxy has to be drained before its name is released.'
@@ -267,6 +270,10 @@ export function ProxyForm({
         <div className="flex flex-col gap-1 sm:col-span-2">
           <span className="label">drain policy</span>
           <p className="mono text-[13px]">{drainPolicies.join(', ')}</p>
+          {/* A path in the known set with nothing to render its problems is the
+              silent drop this form exists to avoid: it would be counted in the
+              summary and shown nowhere. */}
+          <ReadOnlyProblems ctx={ctx} path="spec.lifecycle.drain.policy" />
           <p className="text-[11px]" style={{ color: 'var(--text-faint)' }}>
             {drainPolicies.length === 1
               ? 'The only policy the schema defines, so it is applied and not asked about. A second one would appear here from /meta with no frontend release.'
@@ -342,16 +349,24 @@ function BackendsSection({
   const selector = parseLabels(state.matchLabels);
 
   const matched = useMemo(() => {
-    // Guarded, and the guard is the point: `matchLabels.every(...)` on an empty
-    // map is vacuously true, so an unguarded preview would report "matches all
-    // 12 servers" for the one selector the parser refuses outright.
-    if (selector === undefined) return null;
+    // Guarded twice, and both guards are the point.
+    //
+    // `matchLabels.every(...)` on an empty map is vacuously true, so an
+    // unguarded preview would report "matches all 12 servers" for the one
+    // selector the parser refuses outright.
+    //
+    // And an unprimed fleet is an empty map, which is not the same fact as a
+    // selector matching nothing — this is `backends: null` versus `matched: 0`
+    // all over again, and the second is the one that needs a human. On a hard
+    // load, or with the stream down, claiming "no server carries these labels"
+    // would be a red alert about a perfectly good selector.
+    if (!fleet.primed || selector === undefined) return null;
     return [...fleet.servers.values()].filter(
       (server) =>
         server.definition.kind === 'PaperServer' &&
         selectorMatches(selector, server.definition.metadata.labels),
     );
-  }, [selector, fleet.servers]);
+  }, [selector, fleet.servers, fleet.primed]);
 
   const fallback = parseList(state.fallback) ?? [];
   const unmatchedFallback = fallback.filter(
@@ -371,7 +386,7 @@ function BackendsSection({
         placeholder={'mcorch.dev/fleet=main\ntier=survival'}
         help="One key=value per line. A server is enrolled when it carries every one of them — an AND, never an OR."
       >
-        <SelectorPreview selector={selector} matched={matched} />
+        <SelectorPreview selector={selector} matched={matched} primed={fleet.primed} />
       </AreaField>
 
       <AreaField
@@ -430,15 +445,27 @@ function BackendsSection({
 function SelectorPreview({
   selector,
   matched,
+  primed,
 }: {
   selector: Record<string, string> | undefined;
   matched: readonly ServerResource[] | null;
+  primed: boolean;
 }) {
-  if (selector === undefined || matched === null) {
+  if (selector === undefined) {
     return (
       <p className="text-[11px] mt-1" style={{ color: 'var(--fault)' }}>
         An empty selector is refused, not treated as &ldquo;match everything&rdquo; — it would enrol
         the whole fleet, including another proxy&apos;s backends.
+      </p>
+    );
+  }
+
+  if (!primed || matched === null) {
+    // Said plainly rather than shown as zero. "Nothing has looked yet" and "the
+    // selector matched nothing" are different facts and only one needs a human.
+    return (
+      <p className="text-[11px] mt-1" style={{ color: 'var(--text-faint)' }}>
+        The fleet has not loaded yet, so what this matches is not known.
       </p>
     );
   }
@@ -507,6 +534,7 @@ function ForwardingSection({
       </div>
       <div className="flex flex-col gap-1 sm:col-span-2">
         <span className="label">mode</span>
+        <ReadOnlyProblems ctx={ctx} path="spec.forwarding.mode" />
         {modes.length === 1 ? (
           <>
             <p className="mono text-[13px]">{modes[0]}</p>
@@ -657,17 +685,17 @@ function useSecrets(): readonly SecretSummary[] | null {
   return secrets;
 }
 
-/** Kept exported so the pages can offer the document editor as the other half. */
-export function DocumentEscapeHatch({ onSwitch }: { onSwitch: () => void }) {
-  return (
-    <Panel>
-      <div className="px-4 py-3 flex flex-wrap items-center gap-3">
-        <p className="text-[12px] flex-1" style={{ color: 'var(--text-dim)' }}>
-          Editing as a document sends the text you write, so violations point at the exact line you
-          typed — and it can express anything this form has not caught up with.
-        </p>
-        <Button onClick={onSwitch}>Edit as a document</Button>
-      </div>
-    </Panel>
-  );
+/**
+ * Problems on a path whose control is text rather than an input.
+ *
+ * `spec.forwarding.mode` and `spec.lifecycle.drain.policy` are applied rather
+ * than asked about — there is one legal value for each — but they are still in
+ * the known-path set, so without this a violation on either would be counted in
+ * the summary and rendered nowhere. That is precisely the silent drop this form
+ * had to rule out to be worth having.
+ */
+function ReadOnlyProblems({ ctx, path }: { ctx: FieldContext; path: string }) {
+  const problems = ctx.violations.byField.get(path) ?? [];
+  if (problems.length === 0) return null;
+  return <ProblemList problems={problems} sentText={ctx.sentText} />;
 }

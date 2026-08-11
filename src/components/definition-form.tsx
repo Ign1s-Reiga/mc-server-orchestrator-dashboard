@@ -179,7 +179,8 @@ export function DefinitionForm({
           path="metadata.name"
           label="name"
           required
-          className={nameLocked ? 'opacity-60 pointer-events-none' : undefined}
+          readOnly={nameLocked}
+          className={nameLocked ? 'opacity-60' : undefined}
           help={
             nameLocked
               ? 'Renaming is a create and a delete, not an edit — the old server has to be drained before its name is released.'

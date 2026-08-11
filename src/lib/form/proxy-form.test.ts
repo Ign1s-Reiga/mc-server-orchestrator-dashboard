@@ -3,6 +3,7 @@ import {
   EMPTY_PROXY_FORM,
   changedProxyPaths,
   fromProxyDefinition,
+  proxyInputProblems,
   proxyInvariantProblems,
   toProxyInput,
 } from './proxy-form';
@@ -123,14 +124,16 @@ describe('toProxyInput', () => {
     expect(document.spec.backends.selector.matchLabels).toEqual({});
   });
 
-  it('keeps a token secret only when both halves are filled in', () => {
+  it('sends a half-filled secret coordinate rather than discarding it', () => {
     const half = {
       ...EMPTY_PROXY_FORM,
       values: { ...EMPTY_PROXY_FORM.values, 'spec.control.tokenSecret.name': 'proxy-control' },
     };
-    // A half-filled coordinate is not a coordinate. Sending `{name}` alone
-    // would be a violation about a missing key; sending nothing lets the
-    // hostPort pairing rule produce the message that actually helps.
+    // What the operator typed goes out, and earns a violation naming the half
+    // that is missing. Dropping it would be a silent loss of their input, which
+    // is the failure mode this whole form is measured against. The draft type
+    // says so — `tokenSecret` is a `Partial<SecretRef>` — rather than a cast
+    // claiming both halves are present when only one is.
     expect(toProxyInput(half).spec.control?.tokenSecret).toEqual({ name: 'proxy-control' });
   });
 });
@@ -168,6 +171,54 @@ describe('proxyInvariantProblems', () => {
 
   it('says nothing about a fully valid form', () => {
     expect(proxyInvariantProblems(fromProxyDefinition(MAXIMAL))).toEqual([]);
+  });
+});
+
+/**
+ * Input the form would otherwise lose without saying so.
+ *
+ * The round trip cannot reach these: a *definition* never contains the text
+ * `8375x` or a line with no `=`. Both are silent losses rather than rejections,
+ * which makes them worse than a violation — the document validates green and
+ * the operator is never told what was discarded.
+ */
+describe('proxyInputProblems', () => {
+  const withValues = (values: Record<string, string>) => ({
+    ...EMPTY_PROXY_FORM,
+    values: { ...EMPTY_PROXY_FORM.values, ...values },
+  });
+
+  it('catches a number that is not a number before it is dropped', () => {
+    // `Number('8375x')` is NaN, `asNumber` returns undefined and `compact`
+    // removes the key — so `/validate` goes green, the effective preview shows
+    // the default, and saving an edit silently reverts a running proxy's port.
+    const problems = proxyInputProblems(withValues({ 'spec.control.port': '8375x' }));
+    expect(problems.map((p) => p.path)).toEqual(['spec.control.port']);
+    expect(problems[0].problem).toContain('8375x');
+  });
+
+  it('accepts a well-formed number', () => {
+    expect(proxyInputProblems(withValues({ 'spec.control.port': '8375' }))).toEqual([]);
+  });
+
+  it('catches a YAML-habit line in the selector', () => {
+    // `parseLabels` skips any line with no `=`. For the selector that is not
+    // cosmetic: the proxy would enrol a broader set than what is on screen.
+    const problems = proxyInputProblems({ ...EMPTY_PROXY_FORM, matchLabels: 'tier: survival' });
+    expect(problems.map((p) => p.path)).toEqual(['spec.backends.selector.matchLabels']);
+  });
+
+  it('catches one bad line mixed in with good ones', () => {
+    const problems = proxyInputProblems({
+      ...EMPTY_PROXY_FORM,
+      matchLabels: 'tier=survival\nregion: eu-west',
+    });
+    expect(problems).toHaveLength(1);
+    expect(problems[0].problem).toContain('region: eu-west');
+  });
+
+  it('says nothing about a well-formed form', () => {
+    expect(proxyInputProblems(fromProxyDefinition(MAXIMAL))).toEqual([]);
   });
 });
 

@@ -73,6 +73,7 @@ export function TextField({
   help,
   type = 'text',
   required = false,
+  readOnly = false,
   className,
 }: {
   ctx: FieldContext;
@@ -81,6 +82,13 @@ export function TextField({
   help?: string;
   type?: 'text' | 'number';
   required?: boolean;
+  /**
+   * Genuinely not editable, not merely dimmed. `pointer-events-none` stops a
+   * mouse and nothing else — the input stays in the tab order, so a name that
+   * is part of a resource's identity could be changed by keyboard and submitted
+   * under the old name's `If-Match`.
+   */
+  readOnly?: boolean;
   className?: string;
 }) {
   const id = useId();
@@ -105,6 +113,8 @@ export function TextField({
         value={ctx.values[path] ?? ''}
         onChange={(event) => ctx.setValue(path, event.target.value)}
         placeholder={hint}
+        readOnly={readOnly}
+        aria-readonly={readOnly || undefined}
         aria-invalid={invalid}
         aria-describedby={invalid ? `${id}-problem` : help !== undefined ? `${id}-help` : undefined}
         autoComplete="off"

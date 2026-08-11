@@ -30,12 +30,32 @@
 import type {
   DrainPolicy,
   ForwardingMode,
+  SecretRef,
   VelocityProxyDefinition,
   VelocityProxyInput,
   VelocityProxySpec,
+  VelocityProxySpecInput,
   Violation,
 } from '../api/types';
 import { parseLabels } from './definition-form';
+
+/**
+ * What a half-filled form holds: a `VelocityProxyInput` whose secret
+ * coordinates may still be incomplete.
+ *
+ * A draft is not necessarily valid input — that is the entire point of a form.
+ * `SecretRef` mandates both halves, and sending the one that *was* typed is
+ * more honest than dropping it: it produces a violation naming the missing key,
+ * where discarding it silently would lose what the operator entered. Same
+ * reasoning as `DefinitionDraft` keeping `eulaAccepted: false`.
+ */
+export type ProxyDefinitionDraft = Omit<VelocityProxyInput, 'spec'> & {
+  spec: Omit<VelocityProxySpecInput, 'control'> & {
+    control?: Omit<NonNullable<VelocityProxySpecInput['control']>, 'tokenSecret'> & {
+      tokenSecret?: Partial<SecretRef>;
+    };
+  };
+};
 
 /**
  * Every scalar field, keyed by the dotted path the API uses in
@@ -188,7 +208,7 @@ export function pairLines(pairs: Record<string, string> | undefined): string {
  * violation the operator needs, on the path their input is keyed by, instead of
  * a vaguer one about a missing parent.
  */
-export function toProxyInput(state: ProxyFormState): VelocityProxyInput {
+export function toProxyInput(state: ProxyFormState): ProxyDefinitionDraft {
   const heap = compact({
     max: trimmed(state, 'spec.resources.heap.max'),
     min: trimmed(state, 'spec.resources.heap.min'),
@@ -199,10 +219,13 @@ export function toProxyInput(state: ProxyFormState): VelocityProxyInput {
     hostPort: asNumber(trimmed(state, 'spec.network.hostPort')),
   });
 
-  const tokenSecret = compact({
+  // Partial on purpose, and typed as partial rather than cast: half a
+  // coordinate is what the operator typed, and sending it earns a violation
+  // naming the missing half. Dropping it would discard their input silently.
+  const tokenSecret: Partial<SecretRef> | undefined = compact({
     name: trimmed(state, 'spec.control.tokenSecret.name'),
     key: trimmed(state, 'spec.control.tokenSecret.key'),
-  }) as { name: string; key: string } | undefined;
+  });
 
   const control = compact({
     port: asNumber(trimmed(state, 'spec.control.port')),
@@ -373,6 +396,67 @@ export function proxyInvariantProblems(state: ProxyFormState): Array<{
         'is required once spec.control.hostPort is set: publishing the control endpoint exposes a plane that can move every player in the fleet',
     });
   }
+  return problems;
+}
+
+/** Every path this form renders a number into. */
+const NUMERIC_PATHS: readonly ProxyFieldPath[] = [
+  'spec.maxPlayers',
+  'spec.network.port',
+  'spec.network.hostPort',
+  'spec.control.port',
+  'spec.control.hostPort',
+];
+
+/**
+ * Input this form would otherwise drop on the floor.
+ *
+ * Both cases below are silent losses rather than rejections, which makes them
+ * worse than a violation: `asNumber` turns `8375x` into `undefined` and
+ * `compact` then removes the key, so the document validates green, the
+ * effective preview shows the API's default, and saving an edit quietly reverts
+ * a running proxy's port. `parseLabels` skips any line with no `=`, so a
+ * YAML-habit `tier: survival` disappears and the selector enrols a broader set
+ * than what is on screen.
+ *
+ * Neither can be caught by the round-trip test — a definition never contains
+ * unparsable text — so they are checked here instead.
+ */
+export function proxyInputProblems(state: ProxyFormState): Array<{
+  path: string;
+  problem: string;
+}> {
+  const problems: Array<{ path: string; problem: string }> = [];
+
+  for (const path of NUMERIC_PATHS) {
+    const raw = state.values[path].trim();
+    if (raw.length > 0 && !Number.isFinite(Number(raw))) {
+      problems.push({
+        path,
+        problem: `expected a whole number, found \`${raw}\`. It would otherwise be dropped from the document rather than rejected, leaving the default in place`,
+      });
+    }
+  }
+
+  const skipped = (text: string) =>
+    text
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.includes('='));
+
+  for (const [path, text] of [
+    ['spec.backends.selector.matchLabels', state.matchLabels],
+    ['metadata.labels', state.labels],
+  ] as const) {
+    const bad = skipped(text);
+    if (bad.length > 0) {
+      problems.push({
+        path,
+        problem: `${bad.map((line) => `\`${line}\``).join(', ')} ${bad.length === 1 ? 'has' : 'have'} no \`=\`, so ${bad.length === 1 ? 'it is' : 'they are'} not read as a label. Use \`key=value\`, not YAML \`key: value\``,
+      });
+    }
+  }
+
   return problems;
 }
 
