@@ -16,7 +16,7 @@ import { Empty, Field, Nil, Note, Panel } from './ui';
  * rather than about health: `SEALED` is not a problem, it is the first step of
  * getting people off a server safely.
  */
-const REGISTRATION: Record<BackendRegistration, { tone: Tone; meaning: string }> = {
+export const REGISTRATION: Record<BackendRegistration, { tone: Tone; meaning: string }> = {
   PENDING: { tone: 'quiet', meaning: 'matched by the selector, not in the routing table yet' },
   REGISTERED: { tone: 'ok', meaning: 'in the routing table and accepting players' },
   SEALED: {
