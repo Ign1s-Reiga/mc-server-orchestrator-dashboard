@@ -97,6 +97,7 @@ src/
     form/definition-form.ts       form state keyed by the API's field paths
     display.ts                    how derived values are painted
     filter-chips.ts               which state chips the filter bar offers
+    fleet-tree.ts                 which proxy stands in front of which server
   components/                     shell, panels, the drain ribbon, forms
     proxy-panels.tsx              backend routing and the control endpoint
     document-editor.tsx           the definition editor for non-Paper kinds
@@ -114,6 +115,50 @@ The proxy detail page is where a drain becomes visible across the fleet: a backe
 between is the drain working. Two states are kept carefully apart there — `backends: null` means
 nothing has looked yet, `backends` present with `matched: 0` means the selector matched nothing and
 the proxy is routing players nowhere. The first resolves itself; the second needs a human.
+
+### The fleet is a tree
+
+A proxy and the servers behind it are one thing, so the fleet table nests them: a `VelocityProxy`
+at the top level, and every `PaperServer` its backend selector claims indented beneath it. A server
+no selector claims stays where it is. It is still one table — the columns ask the same questions of
+every row, and two scales would make two servers incomparable — so the nesting is carried in the
+name cell alone.
+
+**The structure comes from the declared selector, not from the observed routing table.** The
+orchestrator already answers "which proxy claims this backend", in `ProxyFleet.resolve`, and it
+answers it from definitions; `src/lib/fleet-tree.ts` computes the same function from the same
+inputs, so the shape on screen is the shape the reconcile loop acts on rather than a second, looser
+idea of "related". It also means the tree is there on the first snapshot: `status.backends` is
+`null` until something has looked, and a topology that only appeared after the first successful
+observation would flatten itself during exactly the incident somebody opened this page for. The
+observed table still has a job — each backend row carries its own `REGISTERED` / `SEALED` /
+`DEREGISTERED`, read from its parent's table, which is a drain moving down the branch it belongs to
+— it is just not what decides parentage. A selector that matches before the routing table has
+caught up is ordinary and says nothing.
+
+Two of `resolve`'s rules are load-bearing here, and both are pinned by tests:
+
+- **Only a `PaperServer` is ever a backend.** `resolve` narrows to `PaperServerDefinition` before it
+  matches a single label, so a proxy carrying labels that satisfy another proxy's selector is still
+  not behind it. The tree is therefore exactly two levels and cannot cycle.
+- **A backend belongs to one proxy.** Two claimants is not "show it twice", it is
+  `Resolution.Conflicted`: the loop will not create or recreate that container until one of the
+  selectors stops matching, because both proxies would route players to it and a drain would tell
+  only one of them to stop. Nesting such a server under either would draw a relationship the
+  orchestrator has explicitly declined to establish, so it sits at the top level behind neither,
+  with a chip naming its claimants and a note saying why nothing is starting.
+
+Filtering keeps the tree honest rather than intact. A proxy whose backends match a filter is shown
+even when the proxy itself does not, dimmed and **not counted** — dropping it would let its backends
+float to the top level, which says they are standalone, and that is the one thing this view exists
+to get right. Collapsing a proxy is the operator's own choice and does not change the count: the
+row says how many backends are folded away.
+
+Proxies are **not** floated above standalone servers. The API sorts its list by name and so does the
+store, and a top level where you cannot predict where a name lands is worse than one where the
+proxies are not all together; the nesting already makes them obvious.
+
+### One kind is edited as a document
 
 Proxies are created and edited as a **document** rather than through the structured form. §5 sends
 JSON and YAML through one parser and reports a line and column into the text as sent, so a
@@ -185,6 +230,11 @@ incident.
   than redialled in a spin; a `bye` after a full lifetime reconnecting at once *without* counting
   an attempt; a `401` reaching the session-lost listeners; and `Retry-After` being honoured on
   `503 STREAM_LIMIT`.
+- `src/lib/fleet-tree.test.ts` pins the tree against `ProxyFleet.resolve`, because the two computing
+  different answers is invisible until an operator drains the wrong branch: a proxy is never nested
+  under another proxy however its labels read; a selector is an AND of equalities; a server two
+  selectors claim is `conflicted` and sits under neither; and a filter that hides a proxy keeps it
+  as an uncounted context row rather than orphaning its backends to the top level.
 - `src/lib/form/definition-form.test.ts` pins two contract invariants: that a fetched `Definition`
   is assignable to `DefinitionInput` with no cast (§14's round-trip claim — the assignment *is* the
   test), and that unset optional fields are omitted rather than sent as `null` (§6 — an explicit
