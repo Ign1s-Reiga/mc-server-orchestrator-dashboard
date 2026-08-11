@@ -59,6 +59,27 @@ function proxyDefinitionOf(server: ServerResource): VelocityProxyDefinition | nu
 }
 
 /**
+ * Every proxy whose selector these labels satisfy, by name, sorted.
+ *
+ * Takes labels rather than a server so the create form can ask the question
+ * before the server exists: a document about to be sent with two claimants
+ * would be born conflicted and never start, and that is worth saying while it
+ * can still be changed.
+ */
+export function proxiesClaiming(
+  labels: Record<string, string> | undefined,
+  proxies: readonly ServerResource[],
+): string[] {
+  return proxies
+    .filter((proxy) => {
+      const definition = proxyDefinitionOf(proxy);
+      return definition !== null && selectorMatches(definition.spec.backends.selector.matchLabels, labels);
+    })
+    .map((proxy) => proxy.name)
+    .sort();
+}
+
+/**
  * Every proxy whose selector claims `server`, by name, sorted.
  *
  * Empty for a proxy: `resolve` returns `Standalone` for anything that is not a
@@ -69,14 +90,7 @@ export function claimingProxies(
   proxies: readonly ServerResource[],
 ): string[] {
   if (server.definition.kind !== 'PaperServer') return [];
-  const labels = server.definition.metadata.labels;
-  return proxies
-    .filter((proxy) => {
-      const definition = proxyDefinitionOf(proxy);
-      return definition !== null && selectorMatches(definition.spec.backends.selector.matchLabels, labels);
-    })
-    .map((proxy) => proxy.name)
-    .sort();
+  return proxiesClaiming(server.definition.metadata.labels, proxies);
 }
 
 export function attachmentOf(

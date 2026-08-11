@@ -84,6 +84,29 @@ export default function ServerDetailPage() {
             <LinkButton href={`/servers/${encodeURIComponent(server.name)}/edit`}>
               Edit spec
             </LinkButton>
+            {/*
+              Only a proxy enrols anything, and only a PaperServer can be
+              enrolled — `resolve` narrows to `PaperServerDefinition` before it
+              matches a label — so this is the one kind that has backends to add.
+
+              Withheld while the proxy is terminating: the name is held until
+              the drain finishes and then released, so a server declared against
+              this selector now would be enrolled by a proxy that is on its way
+              out, and left claimed by nothing the moment it goes.
+            */}
+            {server.kind === 'VelocityProxy' &&
+              (terminating ? (
+                <Button disabled title="this proxy is being deleted, so it will not enrol anything new">
+                  Add backend
+                </Button>
+              ) : (
+                <LinkButton
+                  href={`/servers/new?backendOf=${encodeURIComponent(server.name)}`}
+                  title="create a server carrying this proxy's selector labels, so it is enrolled behind it"
+                >
+                  Add backend
+                </LinkButton>
+              ))}
             <Button variant="danger" onClick={() => setDeleting(true)} disabled={terminating}>
               {terminating ? 'Deleting…' : 'Delete'}
             </Button>
