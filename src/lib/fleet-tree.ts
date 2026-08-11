@@ -24,7 +24,7 @@
  *   is nested under neither.
  */
 
-import type { ServerResource, VelocityProxyDefinition } from './api/types';
+import type { BackendRegistration, ServerResource, VelocityProxyDefinition } from './api/types';
 
 /**
  * Where a server sits — the dashboard's copy of `ProxyFleet.Resolution`.
@@ -103,18 +103,18 @@ export function attachmentOf(
 export function observedRegistration(
   proxy: ServerResource,
   backendName: string,
-): { registration: string; drainInitiated: boolean; online: number | null } | null {
+): { registration: BackendRegistration; drainInitiated: boolean } | null {
   const status = proxy.status;
   if (status === null || status.kind !== 'VelocityProxy') return null;
   const routing = status.backends;
   if (routing === null) return null;
   const entry = routing.backends.find((backend) => backend.server === backendName);
   if (entry === undefined) return null;
-  return {
-    registration: entry.registration,
-    drainInitiated: entry.drainInitiated,
-    online: entry.players?.online ?? null,
-  };
+  // Deliberately not the per-backend player count. The row already carries
+  // `display.playersOnline`, and the proxy's own view of the same number is a
+  // second observation of one fact — worth a column on the proxy's page, where
+  // BackendsPanel has one, and noise next to the count it would sit beside.
+  return { registration: entry.registration, drainInitiated: entry.drainInitiated };
 }
 
 export interface FleetTreeRow {
@@ -131,6 +131,16 @@ export interface FleetTreeRow {
   readonly parent: ServerResource | null;
   /** Last child under its parent, so the branch can be drawn with a corner. */
   readonly last: boolean;
+  /**
+   * Backends this proxy has at all, filter or no filter. Always 0 at depth 1.
+   *
+   * Filter-independent on purpose: it is what says whether the row *can* be
+   * folded. Deriving that from the rows on screen instead would leave a
+   * collapsed proxy whose backends the filter rejected with no disclosure
+   * control at all — indistinguishable from a proxy that has none, and with no
+   * way back to its own children.
+   */
+  readonly backends: number;
   /** Children suppressed because this proxy is collapsed. Always 0 at depth 1. */
   readonly collapsed: number;
 }
@@ -141,8 +151,6 @@ export interface FleetTree {
   readonly matched: number;
   /** Claimed by more than one proxy, so behind none of them. */
   readonly conflicted: readonly ServerResource[];
-  /** Proxies with at least one backend, whether or not the filter kept them. */
-  readonly parents: ReadonlySet<string>;
 }
 
 export interface TreeOptions {
@@ -217,6 +225,7 @@ export function buildFleetTree(
       context: !hit,
       parent: null,
       last: false,
+      backends: brood.length,
       collapsed: hidden,
     });
     if (hit) matched += 1;
@@ -236,16 +245,12 @@ export function buildFleetTree(
         context: false,
         parent: server,
         last: index === keptChildren.length - 1,
+        backends: 0,
         collapsed: 0,
       });
       matched += 1;
     });
   }
 
-  return {
-    rows,
-    matched,
-    conflicted,
-    parents: new Set(children.keys()),
-  };
+  return { rows, matched, conflicted };
 }

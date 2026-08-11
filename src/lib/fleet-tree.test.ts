@@ -305,13 +305,28 @@ describe('buildFleetTree', () => {
     expect(tree.matched).toBe(2);
   });
 
-  it('reports every proxy that has backends, filter or no filter', () => {
-    const tree = buildFleetTree(
-      [proxy('lobby', { fleet: 'main' }), paper('alpha', { fleet: 'main' })],
-      { matches: () => false },
-    );
-    expect(tree.rows).toEqual([]);
-    expect([...tree.parents]).toEqual(['lobby']);
+  it("counts a proxy's backends independently of the filter", () => {
+    // `backends` is what says the row can be folded. Deriving that from the
+    // rows on screen would leave a collapsed proxy whose backends the filter
+    // rejected with no disclosure control — no way back to its own children.
+    const fleet = [
+      proxy('lobby', { fleet: 'main' }),
+      paper('alpha', { fleet: 'main' }),
+      paper('beta', { fleet: 'main' }),
+    ];
+    const unfiltered = buildFleetTree(fleet);
+    expect(unfiltered.rows[0].backends).toBe(2);
+    expect(unfiltered.rows[1].backends).toBe(0);
+
+    const filtered = buildFleetTree(fleet, {
+      matches: (server) => server.name === 'lobby',
+      collapsed: new Set(['lobby']),
+    });
+    expect(filtered.rows).toHaveLength(1);
+    // Nothing to fold away — the filter already removed both — but the proxy
+    // still has backends, so the row still offers a way to unfold.
+    expect(filtered.rows[0].collapsed).toBe(0);
+    expect(filtered.rows[0].backends).toBe(2);
   });
 });
 
@@ -321,7 +336,6 @@ describe('observedRegistration', () => {
     expect(observedRegistration(lobby, 'alpha')).toEqual({
       registration: 'SEALED',
       drainInitiated: false,
-      online: 3,
     });
   });
 

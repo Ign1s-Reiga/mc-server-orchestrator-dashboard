@@ -11,7 +11,7 @@ import {
   UnreadableFlag,
 } from '@/components/state-badge';
 import { DrainInline } from '@/components/drain-ribbon';
-import { ProxyInline } from '@/components/proxy-panels';
+import { ProxyInline, REGISTRATION } from '@/components/proxy-panels';
 import { Button, Chip, Empty, LinkButton, Note, Panel, Spinner, cx } from '@/components/ui';
 import { TONE_COLOR, age } from '@/lib/display';
 import { filterChips } from '@/lib/filter-chips';
@@ -136,8 +136,11 @@ function ConflictedNote({ servers }: { servers: readonly ServerResource[] }) {
         is still allowed and still drains.
       </p>
       <p className="mt-1.5">
-        {servers.length === 1 ? 'It is' : 'They are'} shown at the top level below, behind no proxy,
-        because that is where the orchestrator has left {servers.length === 1 ? 'it' : 'them'}.
+        Wherever {servers.length === 1 ? 'it appears' : 'they appear'} below,{' '}
+        {servers.length === 1 ? 'it sits' : 'they sit'} at the top level behind no proxy, because
+        that is where the orchestrator has left {servers.length === 1 ? 'it' : 'them'}. This note
+        covers the whole fleet: a filter can hide the row, and hiding it does not resolve the
+        condition.
       </p>
     </Note>
   );
@@ -316,17 +319,6 @@ function FleetTable({
   collapsed: ReadonlySet<string>;
 }) {
   const now = useNow();
-  // Which proxies have a disclosure control at all: one with no backend on
-  // screen has nothing to fold, and an arrow that does nothing reads as a bug.
-  const foldable = useMemo(() => {
-    const names = new Set<string>();
-    for (const row of rows) {
-      if (row.parent !== null) names.add(row.parent.name);
-      if (row.collapsed > 0) names.add(row.server.name);
-    }
-    return names;
-  }, [rows]);
-
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-left border-collapse">
@@ -377,8 +369,11 @@ function FleetTable({
                         {row.last ? '└─' : '├─'}
                       </span>
                     ) : (
-                      isProxy &&
-                      foldable.has(server.name) && (
+                      // Offered whenever the proxy has backends at all, not
+                      // only when some are on screen: a collapsed proxy whose
+                      // backends the filter rejected still has to be openable,
+                      // or the filter has taken away the way back to them.
+                      row.backends > 0 && (
                         <button
                           type="button"
                           onClick={() => onToggle(server.name)}
@@ -523,16 +518,19 @@ function FleetTable({
 function BackendRouting({ parent, name }: { parent: ServerResource; name: string }) {
   const routing = observedRegistration(parent, name);
   if (routing === null) return null;
-  const tone =
-    routing.registration === 'REGISTERED'
-      ? 'ok'
-      : routing.registration === 'UNREACHABLE'
-        ? 'fault'
-        : routing.registration === 'SEALED'
-          ? 'work'
-          : 'quiet';
+  // The same vocabulary the proxy's own backends panel uses, from the same
+  // table. Two places painting `SEALED` differently is the sort of drift that
+  // makes an operator distrust both.
+  const facts = REGISTRATION[routing.registration] ?? {
+    tone: 'neutral' as const,
+    meaning: 'a registration state this dashboard does not know about',
+  };
   return (
-    <span className="mono text-[10px] inline-flex gap-1.5" style={{ color: TONE_COLOR[tone] }}>
+    <span
+      className="mono text-[10px] inline-flex gap-1.5"
+      style={{ color: TONE_COLOR[facts.tone] }}
+      title={facts.meaning}
+    >
       <span>{routing.registration.toLowerCase()}</span>
       {routing.drainInitiated && <span style={{ color: 'var(--work)' }}>draining</span>}
     </span>
