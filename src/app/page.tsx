@@ -12,9 +12,10 @@ import {
 } from '@/components/state-badge';
 import { DrainInline } from '@/components/drain-ribbon';
 import { ProxyInline } from '@/components/proxy-panels';
-import { Button, Empty, LinkButton, Note, Panel, Spinner, cx } from '@/components/ui';
-import { age } from '@/lib/display';
+import { Button, Chip, Empty, LinkButton, Note, Panel, Spinner, cx } from '@/components/ui';
+import { TONE_COLOR, age } from '@/lib/display';
 import { filterChips } from '@/lib/filter-chips';
+import { buildFleetTree, observedRegistration, type FleetTreeRow } from '@/lib/fleet-tree';
 import { FALLBACK_DISPLAY_STATES, useMeta } from '@/components/meta-provider';
 import type { DisplayState, ServerResource, UnreadableServer } from '@/lib/api/types';
 
@@ -31,13 +32,24 @@ export default function FleetPage() {
     labelSelector: '',
     attentionOnly: false,
   });
+  const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set());
 
   const servers = useMemo(
     () => fleet.order.map((name) => fleet.servers.get(name)).filter((s): s is ServerResource => s !== undefined),
     [fleet.order, fleet.servers],
   );
 
-  const visible = useMemo(() => servers.filter((server) => matches(server, filters)), [servers, filters]);
+  const tree = useMemo(
+    () => buildFleetTree(servers, { matches: (server) => matches(server, filters), collapsed }),
+    [servers, filters, collapsed],
+  );
+
+  const toggle = (name: string) =>
+    setCollapsed((current) => {
+      const next = new Set(current);
+      if (!next.delete(name)) next.add(name);
+      return next;
+    });
 
   const filtering = filters.states.size > 0 || filters.labelSelector.length > 0 || filters.attentionOnly;
 
@@ -66,27 +78,68 @@ export default function FleetPage() {
 
       {fleet.unreadable.length > 0 && <UnreadablePanel rows={fleet.unreadable} />}
 
+      {tree.conflicted.length > 0 && <ConflictedNote servers={tree.conflicted} />}
+
       <FilterBar filters={filters} onChange={setFilters} servers={servers} />
 
       <Panel>
         {!fleet.primed ? (
           <Spinner label="waiting for the first snapshot" />
-        ) : visible.length === 0 ? (
+        ) : tree.rows.length === 0 ? (
           <EmptyState filtering={filtering} onClear={() => setFilters({ states: new Set(), labelSelector: '', attentionOnly: false })} />
         ) : (
-          <FleetTable servers={visible} />
+          <FleetTable rows={tree.rows} onToggle={toggle} collapsed={collapsed} />
         )}
       </Panel>
 
-      {fleet.primed && visible.length > 0 && (
+      {fleet.primed && tree.rows.length > 0 && (
         <p className="text-[12px]" style={{ color: 'var(--text-faint)' }}>
-          {visible.length === servers.length
+          {tree.matched === servers.length
             ? `${servers.length} server${servers.length === 1 ? '' : 's'}`
-            : `${visible.length} of ${servers.length} servers`}
-          . Sorted by name, the way the API sorts its list.
+            : `${tree.matched} of ${servers.length} servers`}
+          . Sorted by name, the way the API sorts its list, with each proxy&apos;s backends nested
+          beneath it.
         </p>
       )}
     </>
+  );
+}
+
+/**
+ * Servers more than one proxy claims.
+ *
+ * Not a cosmetic ambiguity in this view — it is a state the reconcile loop
+ * refuses to act on. `ProxyFleet.resolve` returns `Conflicted` when two
+ * selectors match, and the server is then neither created nor recreated until
+ * one of them stops matching, because a backend belongs to one proxy: two would
+ * route players to it and a drain would tell only one of them to stop. So these
+ * rows are nested under neither, and the reason is said out loud rather than
+ * left to be inferred from a server that quietly never starts.
+ */
+function ConflictedNote({ servers }: { servers: readonly ServerResource[] }) {
+  return (
+    <Note
+      tone="fault"
+      title={`${servers.length} server${servers.length === 1 ? ' is' : 's are'} claimed by more than one proxy`}
+    >
+      <p>
+        {servers.map((server, index) => (
+          <span key={server.name}>
+            {index > 0 && ', '}
+            <span className="mono">{server.name}</span>
+          </span>
+        ))}{' '}
+        {servers.length === 1 ? 'carries' : 'carry'} every label in the backend selector of two or
+        more proxies. A backend belongs to one proxy — both would route players to it, and a drain
+        would tell only one of them to stop — so the reconcile loop will not create or recreate{' '}
+        {servers.length === 1 ? 'it' : 'them'} until one of those selectors stops matching. Deleting
+        is still allowed and still drains.
+      </p>
+      <p className="mt-1.5">
+        {servers.length === 1 ? 'It is' : 'They are'} shown at the top level below, behind no proxy,
+        because that is where the orchestrator has left {servers.length === 1 ? 'it' : 'them'}.
+      </p>
+    </Note>
   );
 }
 
@@ -244,8 +297,36 @@ function FilterBar({
   );
 }
 
-function FleetTable({ servers }: { servers: readonly ServerResource[] }) {
+/**
+ * The fleet, as a tree.
+ *
+ * Still one table: the columns are the same questions about every row, and
+ * splitting proxies into their own cards would mean reading two scales to
+ * compare two servers. The nesting is carried in the name cell instead — an
+ * indent and a branch glyph — so a backend sits under the proxy that routes to
+ * it without giving up the row it had.
+ */
+function FleetTable({
+  rows,
+  onToggle,
+  collapsed,
+}: {
+  rows: readonly FleetTreeRow[];
+  onToggle: (name: string) => void;
+  collapsed: ReadonlySet<string>;
+}) {
   const now = useNow();
+  // Which proxies have a disclosure control at all: one with no backend on
+  // screen has nothing to fold, and an arrow that does nothing reads as a bug.
+  const foldable = useMemo(() => {
+    const names = new Set<string>();
+    for (const row of rows) {
+      if (row.parent !== null) names.add(row.parent.name);
+      if (row.collapsed > 0) names.add(row.server.name);
+    }
+    return names;
+  }, [rows]);
+
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-left border-collapse">
@@ -260,22 +341,104 @@ function FleetTable({ servers }: { servers: readonly ServerResource[] }) {
           </tr>
         </thead>
         <tbody>
-          {servers.map((server) => (
+          {rows.map((row) => {
+            const server = row.server;
+            const isProxy = server.kind === 'VelocityProxy';
+            const folded = collapsed.has(server.name);
+            // One gutter width per depth, so every name at a level starts in the
+            // same place whether or not it has a glyph in front of it. A proxy
+            // with no disclosure arrow must not sit half a character left of one
+            // that has one — the indent is the only thing carrying the nesting,
+            // so it has to be the only thing that varies.
+            const gutter = row.depth === 1 ? '1.5rem' : '0.875rem';
+            const indent = row.depth === 1 ? '2rem' : '1rem';
+            const align = `calc(${gutter} + 0.375rem)`;
+            return (
             <tr
               key={server.name}
               className="border-b last:border-b-0 hover:bg-[color:var(--bg-sunken)] transition-colors"
+              // A context row is on screen only because a backend under it
+              // matched. Dimming it says "this is not one of your results"
+              // without pretending the backend is standalone.
+              style={row.context ? { opacity: 0.6 } : undefined}
             >
-              <td className="px-4 py-2.5">
-                <Link href={`/servers/${encodeURIComponent(server.name)}`} className="mono text-[13px] font-medium">
-                  {server.name}
-                </Link>
-                <div className="mono text-[10px] mt-0.5" style={{ color: 'var(--text-faint)' }}>
-                  {server.kind === 'VelocityProxy' ? 'proxy' : 'server'}
+              <td className="py-2.5 pr-4" style={{ paddingLeft: indent }}>
+                <div className="flex items-baseline gap-1.5">
+                  <span
+                    className="shrink-0 inline-flex justify-start"
+                    style={{ width: gutter }}
+                  >
+                    {row.depth === 1 ? (
+                      <span
+                        aria-hidden
+                        className="mono text-[13px] select-none"
+                        style={{ color: 'var(--line-strong)' }}
+                      >
+                        {row.last ? '└─' : '├─'}
+                      </span>
+                    ) : (
+                      isProxy &&
+                      foldable.has(server.name) && (
+                        <button
+                          type="button"
+                          onClick={() => onToggle(server.name)}
+                          aria-expanded={!folded}
+                          aria-label={`${folded ? 'show' : 'hide'} the backends of ${server.name}`}
+                          className="mono text-[10px] cursor-pointer"
+                          style={{ color: 'var(--text-faint)' }}
+                        >
+                          {folded ? '▸' : '▾'}
+                        </button>
+                      )
+                    )}
+                  </span>
+                  <Link href={`/servers/${encodeURIComponent(server.name)}`} className="mono text-[13px] font-medium">
+                    {server.name}
+                  </Link>
+                  {row.parent !== null && (
+                    // The glyph and the indent are decoration; this is the
+                    // relationship, for anything not reading them.
+                    <span className="sr-only">— backend of {row.parent.name}</span>
+                  )}
+                </div>
+                <div
+                  className="mono text-[10px] mt-0.5"
+                  style={{ color: 'var(--text-faint)', paddingLeft: align }}
+                >
+                  {isProxy ? 'proxy' : 'server'}
                   {Object.keys(server.definition.metadata.labels ?? {}).length > 0 &&
                     ` · ${Object.entries(server.definition.metadata.labels ?? {})
                       .map(([key, value]) => `${key}=${value}`)
                       .join(' ')}`}
                 </div>
+                {row.parent !== null && (
+                  <div className="mt-0.5" style={{ paddingLeft: align }}>
+                    <BackendRouting parent={row.parent} name={server.name} />
+                  </div>
+                )}
+                {row.attachment.kind === 'conflicted' && (
+                  <div className="mt-1" style={{ paddingLeft: align }}>
+                    <Chip
+                      tone="fault"
+                      title={
+                        'A backend belongs to one proxy. While two claim it, the reconcile loop ' +
+                        'will not create or recreate its container.'
+                      }
+                    >
+                      claimed by {row.attachment.proxies.join(' + ')}
+                    </Chip>
+                  </div>
+                )}
+                {row.collapsed > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => onToggle(server.name)}
+                    className="mono text-[10px] mt-1 cursor-pointer block"
+                    style={{ color: 'var(--work)', paddingLeft: align }}
+                  >
+                    {row.collapsed} backend{row.collapsed === 1 ? '' : 's'} folded away — show
+                  </button>
+                )}
               </td>
               <td className="px-4 py-2.5">
                 <div className="flex items-center gap-2 flex-wrap">
@@ -335,10 +498,44 @@ function FleetTable({ servers }: { servers: readonly ServerResource[] }) {
                 {age(server.metadata.createdAt, now)}
               </td>
             </tr>
-          ))}
+            );
+          })}
         </tbody>
       </table>
     </div>
+  );
+}
+
+/**
+ * How the proxy above this row is currently routing to it.
+ *
+ * The tree is drawn from the declared selector, which is what the reconcile
+ * loop resolves parentage from — but that says nothing about whether players
+ * can actually reach the server right now. This is the observed half, read from
+ * the parent's own routing table: `REGISTERED` → `SEALED` → `DEREGISTERED` is a
+ * drain moving, and seeing it against the branch it belongs to is most of why
+ * this view is a tree.
+ *
+ * Silent when there is nothing observed. A selector that matches before the
+ * table has caught up is ordinary, and painting it as a problem would light up
+ * every label edit.
+ */
+function BackendRouting({ parent, name }: { parent: ServerResource; name: string }) {
+  const routing = observedRegistration(parent, name);
+  if (routing === null) return null;
+  const tone =
+    routing.registration === 'REGISTERED'
+      ? 'ok'
+      : routing.registration === 'UNREACHABLE'
+        ? 'fault'
+        : routing.registration === 'SEALED'
+          ? 'work'
+          : 'quiet';
+  return (
+    <span className="mono text-[10px] inline-flex gap-1.5" style={{ color: TONE_COLOR[tone] }}>
+      <span>{routing.registration.toLowerCase()}</span>
+      {routing.drainInitiated && <span style={{ color: 'var(--work)' }}>draining</span>}
+    </span>
   );
 }
 
