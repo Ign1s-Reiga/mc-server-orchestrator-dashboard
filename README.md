@@ -1,15 +1,17 @@
 # mcorch dashboard
 
-The operator dashboard for [`mc-server-orchestrator`](../mc-server-orchestrator). A Next.js app
+The operator dashboard for
+[`mc-server-orchestrator`](https://github.com/Ign1s-Reiga/mc-server-orchestrator). A Next.js app
 that talks to the orchestrator's `:api` module and nothing else.
 
 It lives in its own repository on purpose: the orchestrator is a Gradle/Kotlin build with no Node
 dependency, the two ship independently, and the orchestrator's `CLAUDE.md` says the SPA lives
 separately.
 
-The contract is [`api/API.md`](../mc-server-orchestrator/api/API.md) in the orchestrator repo. That
-document is the specification — this app is written against it, and its §14 TypeScript block is
-transcribed verbatim into `src/lib/api/types.ts`.
+The contract is
+[`api/API.md`](https://github.com/Ign1s-Reiga/mc-server-orchestrator/blob/main/api/API.md) in the
+orchestrator repo. That document is the specification — this app is written against it, and its §14
+TypeScript block is transcribed verbatim into `src/lib/api/types.ts`.
 
 ---
 
@@ -50,6 +52,8 @@ The reconcile loop opens its CRI channel lazily and issues no RPC at startup, so
 orchestrator starts and serves the API with no containerd present. Servers declared against it sit
 in `PENDING` with a retryable `NODE_UNAVAILABLE` failure, which is enough to develop every screen
 except a live drain.
+
+This assumes the orchestrator is checked out beside this repository.
 
 ```bash
 cd ../mc-server-orchestrator
@@ -208,3 +212,9 @@ found the reconnect-spin bug and the 401-propagation gap in the first place.
   `drain.blocked` and `drain.failure` are disjoint and tell them apart. A blocked drain records no
   failure at all, so a server with people happily playing on it does not light up every
   "is anything wrong" panel.
+
+---
+
+## License
+
+[MIT](LICENSE).
