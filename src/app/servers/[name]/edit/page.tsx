@@ -12,7 +12,14 @@ import {
   toDefinitionInput,
   type FormState,
 } from '@/lib/form/definition-form';
+import {
+  changedProxyPaths,
+  fromProxyDefinition,
+  toProxyInput,
+  type ProxyFormState,
+} from '@/lib/form/proxy-form';
 import { DefinitionForm } from '@/components/definition-form';
+import { ProxyForm } from '@/components/proxy-form';
 import { DocumentEditor } from '@/components/document-editor';
 import { useFleetActions, useServer } from '@/components/fleet-provider';
 import { Button, LinkButton, Note, Panel, Spinner } from '@/components/ui';
@@ -21,20 +28,30 @@ import { relative } from '@/lib/display';
 /**
  * Which editor a definition gets.
  *
- * The structured form is built field by field against the Paper spec. A
- * `VelocityProxy` has a different shape — a label selector, two secret
- * references, a control endpoint — and rather than grow a second field set that
- * would be half-checked, it is edited as a document. Both paths go through the
- * same `POST /validate`, the same complete violation list and the same
- * `If-Match`; only the input widget differs.
+ * Both kinds now have a structured form. The proxy's used to be a document only
+ * — the objection being that a form covering part of a spec drops the rest of
+ * the violations silently — and `proxy-form.test.ts` is what retired it: a
+ * round trip through the form has to return the definition unchanged, so a
+ * field it forgets fails the build rather than an operator.
+ *
+ * The document editor is kept for the proxy rather than replaced. §5 reports a
+ * line and column into the text as sent, so a document written by hand gets
+ * violations against the exact line typed, and it can express anything the
+ * schema grows before this form catches up. Both paths share `POST /validate`,
+ * the complete violation list and `If-Match`.
  */
 type Editor =
   | { kind: 'PaperServer'; form: FormState }
-  | { kind: 'VelocityProxy'; text: string };
+  | { kind: 'VelocityProxy'; mode: 'form' | 'document'; form: ProxyFormState; text: string };
 
 function editorFor(definition: Definition): Editor {
   return definition.kind === 'VelocityProxy'
-    ? { kind: 'VelocityProxy', text: JSON.stringify(definition, null, 2) }
+    ? {
+        kind: 'VelocityProxy',
+        mode: 'form',
+        form: fromProxyDefinition(definition),
+        text: JSON.stringify(definition, null, 2),
+      }
     : { kind: 'PaperServer', form: fromDefinition(definition) };
 }
 
@@ -92,10 +109,15 @@ export default function EditServerPage() {
       return changedPaths(loaded.editor.form, editor.form);
     }
     if (loaded.editor.kind === 'VelocityProxy' && editor.kind === 'VelocityProxy') {
-      // A document editor cannot name the fields that moved without parsing the
-      // text itself, which would mean a second parser disagreeing with the one
-      // that matters. "The document" is the honest granularity here.
-      return loaded.editor.text.trim() === editor.text.trim() ? [] : ['the document'];
+      // The form knows which fields moved. The document editor cannot without
+      // parsing the text itself, which would mean a second parser disagreeing
+      // with the one that decides — so "the document" stays the honest
+      // granularity there.
+      return editor.mode === 'form'
+        ? changedProxyPaths(loaded.editor.form, editor.form)
+        : loaded.editor.text.trim() === editor.text.trim()
+          ? []
+          : ['the document'];
     }
     return [];
   }, [loaded, editor]);
@@ -110,7 +132,9 @@ export default function EditServerPage() {
       const body =
         editor.kind === 'PaperServer'
           ? jsonBody(toDefinitionInput(editor.form))
-          : yamlBody(editor.text);
+          : editor.mode === 'form'
+            ? jsonBody(toProxyInput(editor.form))
+            : yamlBody(editor.text);
       const { server } = await replaceServer(name, body, loaded.etag);
       merge(server);
       router.push(`/servers/${encodeURIComponent(name)}`);
@@ -259,11 +283,35 @@ export default function EditServerPage() {
           header={header}
           footer={footer}
         />
+      ) : editor.mode === 'form' ? (
+        <ProxyForm
+          state={editor.form}
+          onChange={(form) => {
+            setEditor({ ...editor, form });
+            setViolations(null);
+          }}
+          onSubmit={() => void submit()}
+          submitLabel="Save spec"
+          busy={busy || terminating}
+          nameLocked
+          submitViolations={violations}
+          header={header}
+          footer={footer}
+          onSwitchToDocument={() => {
+            // Seeded from the form, so nothing edited is lost on the way over.
+            setEditor({
+              ...editor,
+              mode: 'document',
+              text: JSON.stringify(toProxyInput(editor.form), null, 2),
+            });
+            setViolations(null);
+          }}
+        />
       ) : (
         <DocumentEditor
           value={editor.text}
           onChange={(text) => {
-            setEditor({ kind: 'VelocityProxy', text });
+            setEditor({ ...editor, text });
             setViolations(null);
           }}
           onSubmit={() => void submit()}
@@ -271,7 +319,21 @@ export default function EditServerPage() {
           busy={busy || terminating}
           submitViolations={violations}
           header={header}
-          footer={footer}
+          footer={
+            <>
+              {footer}
+              <Button
+                onClick={() => {
+                  setEditor({ ...editor, mode: 'form' });
+                  setViolations(null);
+                }}
+                variant="ghost"
+                title="the form is restored as it was — edits made to this document are not read back"
+              >
+                Back to the form
+              </Button>
+            </>
+          }
         />
       )}
     </>

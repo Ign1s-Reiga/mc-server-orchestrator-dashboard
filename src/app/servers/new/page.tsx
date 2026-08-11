@@ -7,9 +7,15 @@ import { createServer, jsonBody, yamlBody } from '@/lib/api/client';
 import { describeError, isConflict, isValidationFailure } from '@/lib/api/errors';
 import type { Kind, ServerResource, Violation } from '@/lib/api/types';
 import { EMPTY_FORM, parseLabels, toDefinitionInput, type FormState } from '@/lib/form/definition-form';
+import {
+  EMPTY_PROXY_FORM,
+  toProxyInput,
+  type ProxyFormState,
+} from '@/lib/form/proxy-form';
 import { backendFormFor } from '@/lib/form/backend-prefill';
 import { proxiesClaiming } from '@/lib/fleet-tree';
 import { DefinitionForm } from '@/components/definition-form';
+import { ProxyForm } from '@/components/proxy-form';
 import { DocumentEditor } from '@/components/document-editor';
 import { useFleet, useFleetActions, useServer } from '@/components/fleet-provider';
 import { FALLBACK_KINDS, useMeta } from '@/components/meta-provider';
@@ -133,6 +139,11 @@ function NewServerForm({ backendOf }: { backendOf: string | null }) {
 
   const [kind, setKind] = useState<Kind>('PaperServer');
   const [state, setState] = useState<FormState>(prefill ?? EMPTY_FORM);
+  const [proxyForm, setProxyForm] = useState<ProxyFormState>(EMPTY_PROXY_FORM);
+  // The document editor is the other half of the same contract, not a fallback
+  // — §5 positions violations into the text as sent, which a form cannot do —
+  // so it stays reachable rather than being replaced by the structured editor.
+  const [proxyMode, setProxyMode] = useState<'form' | 'document'>('form');
   const [document, setDocument] = useState(PROXY_SKELETON);
   const [busy, setBusy] = useState(false);
   const [violations, setViolations] = useState<readonly Violation[] | null>(null);
@@ -157,7 +168,11 @@ function NewServerForm({ backendOf }: { backendOf: string | null }) {
     setError(null);
     try {
       const body =
-        effectiveKind === 'PaperServer' ? jsonBody(toDefinitionInput(state)) : yamlBody(document);
+        effectiveKind === 'PaperServer'
+          ? jsonBody(toDefinitionInput(state))
+          : proxyMode === 'form'
+            ? jsonBody(toProxyInput(proxyForm))
+            : yamlBody(document);
       const { server } = await createServer(body);
       merge(server);
       // Nothing is running yet: the resource comes back with `status: null`
@@ -301,6 +316,28 @@ function NewServerForm({ backendOf }: { backendOf: string | null }) {
             </LinkButton>
           }
         />
+      ) : proxyMode === 'form' ? (
+        <ProxyForm
+          state={proxyForm}
+          onChange={(next) => {
+            setProxyForm(next);
+            setViolations(null);
+          }}
+          onSubmit={() => void submit()}
+          submitLabel="Create proxy"
+          busy={busy}
+          submitViolations={violations}
+          header={header}
+          footer={<LinkButton href="/">Cancel</LinkButton>}
+          onSwitchToDocument={() => {
+            // Seeded from the form so nothing typed is lost. The reverse is not
+            // offered as a conversion: reading YAML back would mean a second
+            // parser in this app disagreeing with the one that decides.
+            setDocument(JSON.stringify(toProxyInput(proxyForm), null, 2));
+            setProxyMode('document');
+            setViolations(null);
+          }}
+        />
       ) : (
         <DocumentEditor
           value={document}
@@ -322,7 +359,21 @@ function NewServerForm({ backendOf }: { backendOf: string | null }) {
               </Note>
             </>
           }
-          footer={<LinkButton href="/">Cancel</LinkButton>}
+          footer={
+            <>
+              <LinkButton href="/">Cancel</LinkButton>
+              <Button
+                onClick={() => {
+                  setProxyMode('form');
+                  setViolations(null);
+                }}
+                variant="ghost"
+                title="the form is restored as it was — edits made to this document are not read back"
+              >
+                Back to the form
+              </Button>
+            </>
+          }
         />
       )}
     </>

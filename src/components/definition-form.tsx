@@ -1,20 +1,28 @@
 'use client';
 
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { jsonBody, validateDefinition } from '@/lib/api/client';
 import { describeError, isApiError, isValidationFailure } from '@/lib/api/errors';
 import type { Definition, Violation } from '@/lib/api/types';
 import {
   DEFAULT_HINTS,
   NO_VIOLATIONS,
+  PAPER_KNOWN_PATHS,
   indexViolations,
-  sourceLine,
   toDefinitionInput,
   type FieldPath,
   type FormState,
-  type ViolationIndex,
 } from '@/lib/form/definition-form';
-import { Button, Note, Panel, cx } from './ui';
+import { Button, Note } from './ui';
+import {
+  AreaField,
+  EffectivePreview,
+  ProblemList,
+  Section,
+  TextField,
+  ViolationSummary,
+  type FieldContext,
+} from './form-fields';
 import {
   FALLBACK_DRAIN_POLICIES,
   FALLBACK_STORAGE_MODES,
@@ -34,142 +42,6 @@ const STORAGE_MODE_MEANING: Record<string, string> = {
   ephemeral:
     'World data does not survive the container. Only for disposable lobbies and minigame instances.',
 };
-
-/* ------------------------------------------------------------------ inputs */
-
-interface FieldContext {
-  state: FormState;
-  setValue: (path: FieldPath, value: string) => void;
-  violations: ViolationIndex;
-  /** The exact JSON that produced the current violations, for line lookups. */
-  sentText: string | null;
-}
-
-/**
- * One input, wired to its dotted path.
- *
- * Violations arrive from the API attached to a `field` — the same path this
- * input is keyed by — so an error lands on the control that caused it. §5 says
- * the schema went to some trouble to make that possible; dumping the list at
- * the top of the form would waste it.
- */
-function Input({
-  ctx,
-  path,
-  label,
-  help,
-  type = 'text',
-  required = false,
-  className,
-}: {
-  ctx: FieldContext;
-  path: FieldPath;
-  label: string;
-  help?: string;
-  type?: 'text' | 'number';
-  required?: boolean;
-  className?: string;
-}) {
-  const id = useId();
-  const problems = ctx.violations.byField.get(path) ?? [];
-  const invalid = problems.length > 0;
-
-  return (
-    <div className={cx('flex flex-col gap-1', className)}>
-      <label htmlFor={id} className="label flex items-baseline gap-1.5">
-        {label}
-        {required && (
-          <span aria-hidden style={{ color: 'var(--fault)' }}>
-            *
-          </span>
-        )}
-      </label>
-      <input
-        id={id}
-        type={type}
-        inputMode={type === 'number' ? 'numeric' : undefined}
-        value={ctx.state.values[path]}
-        onChange={(event) => ctx.setValue(path, event.target.value)}
-        placeholder={DEFAULT_HINTS[path]}
-        aria-invalid={invalid}
-        aria-describedby={invalid ? `${id}-problem` : help !== undefined ? `${id}-help` : undefined}
-        autoComplete="off"
-        spellCheck={false}
-        className="mono text-[13px] px-2.5 h-8 border rounded-sm w-full"
-        style={{
-          background: 'var(--bg-raised)',
-          borderColor: invalid ? 'var(--fault)' : undefined,
-        }}
-      />
-      {invalid ? (
-        <ProblemList id={`${id}-problem`} problems={problems} sentText={ctx.sentText} />
-      ) : (
-        help !== undefined && (
-          <p id={`${id}-help`} className="text-[11px]" style={{ color: 'var(--text-faint)' }}>
-            {help}
-          </p>
-        )
-      )}
-      {!invalid && help === undefined && DEFAULT_HINTS[path] !== undefined && (
-        <p className="text-[11px]" style={{ color: 'var(--text-faint)' }}>
-          Leave blank for {DEFAULT_HINTS[path]}.
-        </p>
-      )}
-    </div>
-  );
-}
-
-function ProblemList({
-  id,
-  problems,
-  sentText,
-}: {
-  id: string;
-  problems: readonly Violation[];
-  sentText: string | null;
-}) {
-  return (
-    <div id={id} className="flex flex-col gap-1">
-      {problems.map((problem, index) => {
-        const line =
-          problem.location !== null && sentText !== null
-            ? sourceLine(sentText, problem.location.line)
-            : null;
-        return (
-          <div key={index}>
-            <p className="text-[12px]" style={{ color: 'var(--fault)' }}>
-              {problem.problem}
-            </p>
-            {problem.location !== null && (
-              <p className="mono text-[10px] mt-0.5" style={{ color: 'var(--text-faint)' }}>
-                line {problem.location.line}:{problem.location.column}
-                {line !== null && <span> · {line.trim()}</span>}
-              </p>
-            )}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function Section({
-  title,
-  hint,
-  children,
-  columns = 2,
-}: {
-  title: string;
-  hint?: string;
-  children: React.ReactNode;
-  columns?: 1 | 2;
-}) {
-  return (
-    <Panel title={title} hint={hint}>
-      <div className={cx('grid gap-4 p-4', columns === 2 && 'sm:grid-cols-2')}>{children}</div>
-    </Panel>
-  );
-}
 
 /* -------------------------------------------------------------------- form */
 
@@ -212,8 +84,8 @@ export function DefinitionForm({
   const [sentText, setSentText] = useState<string | null>(null);
 
   const setValue = useCallback(
-    (path: FieldPath, value: string) => {
-      onChange({ ...state, values: { ...state.values, [path]: value } });
+    (path: string, value: string) => {
+      onChange({ ...state, values: { ...state.values, [path as FieldPath]: value } });
     },
     [state, onChange],
   );
@@ -271,11 +143,17 @@ export function DefinitionForm({
   // document that was submitted, not to whatever has been typed since.
   const active = submitViolations ?? liveViolations;
   const violations = useMemo(
-    () => (active === null ? NO_VIOLATIONS : indexViolations(active)),
+    () => (active === null ? NO_VIOLATIONS : indexViolations(active, PAPER_KNOWN_PATHS)),
     [active],
   );
 
-  const ctx: FieldContext = { state, setValue, violations, sentText };
+  const ctx: FieldContext = {
+    values: state.values,
+    setValue,
+    violations,
+    sentText,
+    hints: DEFAULT_HINTS,
+  };
 
   return (
     <form
@@ -287,24 +165,7 @@ export function DefinitionForm({
     >
       {header}
 
-      {violations.total > 0 && (
-        <Note tone="fault" title={`${violations.total} problem${violations.total === 1 ? '' : 's'}`}>
-          Each one is marked on its field below. The API reports every problem in a document at
-          once, so this is the complete list — fixing them all makes the next submit succeed.
-          {violations.unattached.length > 0 && (
-            <ul className="mt-2 flex flex-col gap-1">
-              {violations.unattached.map((violation, index) => (
-                <li key={index} className="text-[12px]">
-                  <span className="mono" style={{ color: 'var(--fault)' }}>
-                    {violation.field}
-                  </span>{' '}
-                  {violation.problem}
-                </li>
-              ))}
-            </ul>
-          )}
-        </Note>
-      )}
+      <ViolationSummary violations={violations} />
 
       {validateError !== null && (
         <Note tone="work" title="live checking is not available">
@@ -313,7 +174,7 @@ export function DefinitionForm({
       )}
 
       <Section title="identity">
-        <Input
+        <TextField
           ctx={ctx}
           path="metadata.name"
           label="name"
@@ -325,29 +186,20 @@ export function DefinitionForm({
               : 'Lowercase. This is the identity the reconcile loop and the drain protocol use.'
           }
         />
-        <div className="flex flex-col gap-1">
-          <label className="label" htmlFor="labels">
-            labels
-          </label>
-          <textarea
-            id="labels"
-            value={state.labels}
-            onChange={(event) => onChange({ ...state, labels: event.target.value })}
-            rows={2}
-            spellCheck={false}
-            placeholder={'tier=survival\nregion=eu-west'}
-            className="mono text-[13px] px-2.5 py-1.5 border rounded-sm w-full"
-            style={{ background: 'var(--bg-raised)' }}
-          />
-          <p className="text-[11px]" style={{ color: 'var(--text-faint)' }}>
-            One key=value per line. Changing only labels does not move the generation, so it causes
-            no drain.
-          </p>
-        </div>
+        <AreaField
+          ctx={ctx}
+          path="metadata.labels"
+          label="labels"
+          value={state.labels}
+          onChange={(labels) => onChange({ ...state, labels })}
+          rows={2}
+          placeholder={'tier=survival\nregion=eu-west'}
+          help="One key=value per line. Changing only labels does not move the generation, so it causes no drain — but it can change which proxy enrols this server."
+        />
       </Section>
 
       <Section title="image">
-        <Input
+        <TextField
           ctx={ctx}
           path="spec.image"
           label="image"
@@ -355,8 +207,8 @@ export function DefinitionForm({
           className="sm:col-span-2"
           help="Pinned to a tag or a digest. A moving tag like `latest` makes an image change invisible to reconcile."
         />
-        <Input ctx={ctx} path="spec.paper.minecraftVersion" label="minecraft version" required help="A release, such as 1.21.8." />
-        <Input ctx={ctx} path="spec.paper.build" label="paper build" type="number" />
+        <TextField ctx={ctx} path="spec.paper.minecraftVersion" label="minecraft version" required help="A release, such as 1.21.8." />
+        <TextField ctx={ctx} path="spec.paper.build" label="paper build" type="number" />
 
         <div className="sm:col-span-2 flex items-start gap-2.5">
           <input
@@ -388,9 +240,9 @@ export function DefinitionForm({
       </Section>
 
       <Section title="capacity and network">
-        <Input ctx={ctx} path="spec.maxPlayers" label="max players" type="number" />
-        <Input ctx={ctx} path="spec.network.port" label="game port" type="number" />
-        <Input ctx={ctx} path="spec.network.hostPort" label="host port" type="number" help="Publish the game port on the host. Leave blank to keep it internal." />
+        <TextField ctx={ctx} path="spec.maxPlayers" label="max players" type="number" />
+        <TextField ctx={ctx} path="spec.network.port" label="game port" type="number" />
+        <TextField ctx={ctx} path="spec.network.hostPort" label="host port" type="number" help="Publish the game port on the host. Leave blank to keep it internal." />
         <div />
 
         <div className="sm:col-span-2 flex flex-col gap-3 pt-1 border-t">
@@ -407,15 +259,15 @@ export function DefinitionForm({
           </div>
           {state.rconEnabled && (
             <div className="grid sm:grid-cols-3 gap-4">
-              <Input ctx={ctx} path="spec.network.rcon.port" label="rcon port" type="number" />
-              <Input
+              <TextField ctx={ctx} path="spec.network.rcon.port" label="rcon port" type="number" />
+              <TextField
                 ctx={ctx}
                 path="spec.network.rcon.passwordSecret.name"
                 label="password secret"
                 required
                 help="A secret name."
               />
-              <Input
+              <TextField
                 ctx={ctx}
                 path="spec.network.rcon.passwordSecret.key"
                 label="secret key"
@@ -428,10 +280,10 @@ export function DefinitionForm({
       </Section>
 
       <Section title="resources">
-        <Input ctx={ctx} path="spec.resources.memory" label="container memory" required help="At least 1Gi. Example: 4Gi." />
-        <Input ctx={ctx} path="spec.resources.cpu" label="cpu" help="Example: 2500m or 2." />
-        <Input ctx={ctx} path="spec.resources.heap.max" label="jvm heap max" help="Left blank, the parser leaves headroom below the container limit so the JVM cannot be OOM-killed." />
-        <Input ctx={ctx} path="spec.resources.heap.min" label="jvm heap min" />
+        <TextField ctx={ctx} path="spec.resources.memory" label="container memory" required help="At least 1Gi. Example: 4Gi." />
+        <TextField ctx={ctx} path="spec.resources.cpu" label="cpu" help="Example: 2500m or 2." />
+        <TextField ctx={ctx} path="spec.resources.heap.max" label="jvm heap max" help="Left blank, the parser leaves headroom below the container limit so the JVM cannot be OOM-killed." />
+        <TextField ctx={ctx} path="spec.resources.heap.min" label="jvm heap min" />
       </Section>
 
       <Section title="storage" columns={1}>
@@ -470,11 +322,11 @@ export function DefinitionForm({
         )}
 
         <div className="grid sm:grid-cols-3 gap-4">
-          <Input ctx={ctx} path="spec.storage.mountPath" label="mount path" />
+          <TextField ctx={ctx} path="spec.storage.mountPath" label="mount path" />
           {state.storageMode === 'persistent' && (
             <>
-              <Input ctx={ctx} path="spec.storage.volume.name" label="volume name" />
-              <Input ctx={ctx} path="spec.storage.volume.size" label="volume size" />
+              <TextField ctx={ctx} path="spec.storage.volume.name" label="volume name" />
+              <TextField ctx={ctx} path="spec.storage.volume.size" label="volume size" />
             </>
           )}
         </div>
@@ -490,29 +342,29 @@ export function DefinitionForm({
               : 'Served by the API — this build renders whatever the schema defines.'}
           </p>
         </div>
-        <Input
+        <TextField
           ctx={ctx}
           path="spec.lifecycle.drain.playerTransferTimeout"
           label="player transfer timeout"
           help="How long to spend moving players off before giving up."
         />
-        <Input
+        <TextField
           ctx={ctx}
           path="spec.lifecycle.drain.saveTimeout"
           label="save timeout"
           help="How long to wait for the world save to be confirmed."
         />
-        <Input
+        <TextField
           ctx={ctx}
           path="spec.lifecycle.stopGracePeriod"
           label="stop grace period"
           help="The last-resort net, not the save path. It must stay above the save timeout."
         />
-        <Input ctx={ctx} path="spec.lifecycle.startupTimeout" label="startup timeout" />
+        <TextField ctx={ctx} path="spec.lifecycle.startupTimeout" label="startup timeout" />
       </Section>
 
       <Section title="placement" columns={1}>
-        <Input
+        <TextField
           ctx={ctx}
           path="spec.placement.node"
           label="node"
@@ -532,47 +384,3 @@ export function DefinitionForm({
   );
 }
 
-/**
- * What the parser makes of the document as typed.
- *
- * §6: "Showing an operator what their omissions became is most of what this is
- * for." A create form full of blanks is otherwise a guess about what will
- * actually run.
- */
-function EffectivePreview({
-  effective,
-  checking,
-}: {
-  effective: Definition | null;
-  checking: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  return (
-    <Panel
-      title="effective definition"
-      hint={
-        checking
-          ? 'checking…'
-          : effective !== null
-            ? 'valid — this is what the reconciler would act on'
-            : 'not valid yet'
-      }
-      actions={
-        effective !== null && (
-          <Button onClick={() => setOpen(!open)} aria-expanded={open}>
-            {open ? 'Hide' : 'Show'}
-          </Button>
-        )
-      }
-    >
-      {open && effective !== null && (
-        <pre
-          className="mono text-[12px] leading-relaxed p-4 overflow-x-auto max-h-96"
-          style={{ background: 'var(--bg-sunken)' }}
-        >
-          {JSON.stringify(effective, null, 2)}
-        </pre>
-      )}
-    </Panel>
-  );
-}
