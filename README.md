@@ -95,12 +95,15 @@ src/
     stream/sse.ts                 SSE frame parser
     stream/store.ts               the live fleet, and connection honesty
     form/definition-form.ts       form state keyed by the API's field paths
+    form/proxy-form.ts            the same, for a proxy — coverage pinned by a round trip
     display.ts                    how derived values are painted
     filter-chips.ts               which state chips the filter bar offers
     fleet-tree.ts                 which proxy stands in front of which server
   components/                     shell, panels, the drain ribbon, forms
     proxy-panels.tsx              backend routing and the control endpoint
-    document-editor.tsx           the definition editor for non-Paper kinds
+    form-fields.tsx               the controls both definition forms are built from
+    proxy-form.tsx                the structured proxy editor, with a live selector preview
+    document-editor.tsx           the raw-document editor, kept for proxies
 ```
 
 ### Two kinds, one set of routes
@@ -158,12 +161,45 @@ Proxies are **not** floated above standalone servers. The API sorts its list by 
 store, and a top level where you cannot predict where a name lands is worse than one where the
 proxies are not all together; the nesting already makes them obvious.
 
-### One kind is edited as a document
+### Both kinds have a form; the proxy also keeps its document editor
 
-Proxies are created and edited as a **document** rather than through the structured form. §5 sends
-JSON and YAML through one parser and reports a line and column into the text as sent, so a
-hand-written document gets violations pointing at the exact line typed — better than a second field
-set that would be half-checked. Live `/validate`, `If-Match` and the 409 recovery are shared.
+A proxy used to be editable only as a raw document, on an argument worth restating because it is
+what the form had to get past: §5 sends JSON and YAML through one parser and reports a line and
+column into the text as sent, so a hand-written document gets violations pointing at the exact line
+typed — and a structured form covering only *part* of a spec is worse than a text box, because a
+violation on a path with no rendered input is dropped silently and the operator is left with a
+clean-looking form that will not submit. The orchestrator's `docs/troubleshooting.md` names that
+failure.
+
+Both halves of that are now answered rather than accepted:
+
+- **Coverage is a build-time property.** `src/lib/form/proxy-form.test.ts` runs a definition with
+  every optional field set through `fromProxyDefinition` and back through `toProxyInput` and
+  requires the document that comes out to equal the one that went in. A field the form forgets is a
+  field the round trip drops, so it fails the build rather than an operator. Checked against a live
+  parser too: the form's minimal and maximal documents both validate, and an empty form produces
+  violations on six paths — every one of which has a rendered input.
+- **Nothing is dropped at runtime either.** `indexViolations` attaches by longest known prefix, so
+  `spec.backends.selector.matchLabels.BAD KEY!` — a real path a live parser returns — lands on the
+  selector textarea instead of floating. Whatever still does not match is listed unconditionally
+  with its path.
+
+The document editor is **kept**, one click away in both directions, because the line-and-column
+advantage is real and because it is the only way to express something the schema grows before this
+form catches up. Switching to it seeds the text from the form, so nothing typed is lost; switching
+back restores the form as it was, because reading YAML in would mean a second parser in this app
+disagreeing with the one that decides.
+
+Two things the form does that a document cannot, both of which cost an outage when missed:
+
+- **The selector says what it matches right now**, live against the fleet. An empty `matchLabels` is
+  refused rather than meaning "everything", and a selector matching nothing leaves the proxy up,
+  accepting players and routing them nowhere — `DEGRADED`, and the reconcile loop cannot fix a
+  selector.
+- **The forwarding secret is checked for existence.** It is a coordinate, never a value, so a typo
+  parses perfectly and fails much later as `FORWARDING_SECRET_UNAVAILABLE`.
+
+Live `/validate`, `If-Match` and the 409 recovery are shared by every path.
 
 ### Rows that will not decode
 

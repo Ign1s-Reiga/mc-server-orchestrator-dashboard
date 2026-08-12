@@ -303,15 +303,45 @@ export interface ViolationIndex {
   total: number;
 }
 
-export function indexViolations(violations: readonly Violation[]): ViolationIndex {
-  const known = new Set<string>([...FIELD_PATHS, ...CONTROL_PATHS]);
+/** The paths the Paper form renders a control for. */
+export const PAPER_KNOWN_PATHS: readonly string[] = [...FIELD_PATHS, ...CONTROL_PATHS];
+
+/**
+ * Attaches each violation to the deepest control that owns it.
+ *
+ * An exact path match is the common case. The prefix arm exists for the
+ * controls that hold a *collection* — `metadata.labels`,
+ * `spec.backends.selector.matchLabels` — where the parser reports against the
+ * offending entry (`…matchLabels.tier`) rather than the block. Without it those
+ * land in `unattached`, which is honest but sends the operator hunting for a
+ * field whose input is right there. Longest prefix wins, so a nested control
+ * beats its parent, and the `.` guard stops `spec.network.port` from swallowing
+ * a hypothetical `spec.network.portRange`.
+ */
+export function indexViolations(
+  violations: readonly Violation[],
+  knownPaths: readonly string[] = PAPER_KNOWN_PATHS,
+): ViolationIndex {
+  const known = new Set<string>(knownPaths);
   const byField = new Map<string, Violation[]>();
   const unattached: Violation[] = [];
 
+  const owner = (field: string): string | null => {
+    if (known.has(field)) return field;
+    let best: string | null = null;
+    for (const candidate of known) {
+      if (field.startsWith(`${candidate}.`) && (best === null || candidate.length > best.length)) {
+        best = candidate;
+      }
+    }
+    return best;
+  };
+
   for (const violation of violations) {
-    if (known.has(violation.field)) {
-      const existing = byField.get(violation.field);
-      if (existing === undefined) byField.set(violation.field, [violation]);
+    const path = owner(violation.field);
+    if (path !== null) {
+      const existing = byField.get(path);
+      if (existing === undefined) byField.set(path, [violation]);
       else existing.push(violation);
     } else {
       unattached.push(violation);
